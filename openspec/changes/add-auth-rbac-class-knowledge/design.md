@@ -1,130 +1,146 @@
 ## Context
 
-仓库根已有 README 三行说明、项目规则文件与本 change 四件套，尚无业务代码。动机见 `proposal.md` 的 Why；可验收行为见 `specs/auth-upload/spec.md`。Apply 阶段（第 3 课）在本仓库实现 CampusClaw 最小可运行栈。
+仓库根已有 README、项目规则文件（AGENTS.md / CLAUDE.md）与本 change 四件套，尚无业务代码。动机见 `proposal.md` 的 Why；可验收行为见 `specs/auth-upload/spec.md`（下文用 R1–R10 指代其中的 Requirement）。第 2 课初稿采用 Flask + SQLite 服务端渲染，第 3 课需求明确为前后端分离的 Go + MySQL + React 栈，本版 design 据此改写（见 Decision 1）。
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- 登录可用，会话携带 `user_id`、`role` 与 `class_id`。
-- 权限在服务端可判定：学生上传返回 403。
-- 班级隔离不可通过改前端或篡改请求参数绕过：列表查询与按 ID 访问都校验班级。
-- 教师上传链路完整：落盘 → 解析 → 同一事务写入材料表与知识库表 → 本班列表查库可见。
-- `docker compose up` 一键启动；`GET /health` 供探活；密钥与数据库路径可通过环境变量配置。
+- 只有一条请求链路：浏览器 → Nginx → Go → MySQL；信任边界在 Go，浏览器与静态页一律不可信。
+- 认证、授权、隔离三件事分别可判定：会话携带用户、角色、班级；学生上传 403；跨班 404。
+- 上传链路完整且无脏数据：校验 → 落盘 → 解析 → 同事务双表入库 → 本班可见；原文件只经鉴权接口下载。
+- 第三方按 README 执行 `docker compose up --build` 即可复现；down 再 up 数据仍在。
 
 **Non-Goals:**
 
-- 见 `proposal.md` 的 Non-goals（检索问答、对话、作业、账号管理、SSO、生产 HA 等）。
-- 不做管理员角色与跨班管理 API。
+- 见 `proposal.md` 的 Non-goals。
+- 不做"就绪探针"语义：`/health` 只表示进程存活。
 
 ## Decisions
 
-### Decision 1：技术栈 Flask + SQLite
+### Decision 1：技术栈 —— Go + MySQL + React + Nginx（替代第 2 课初稿的 Flask + SQLite）
 
-| 层次 | 选择 | 说明 |
+| 层 | 选型 | 用途 |
 | --- | --- | --- |
-| Web | Flask 3.x | 路由；Jinja2 服务端渲染登录页与材料列表；上传与 JSON API 同进程 |
-| DB | SQLite 3 | 单文件 `data/app.db`，标准库 `sqlite3`，全部使用参数化查询 |
-| 密码 | werkzeug.security（pbkdf2/scrypt）或 bcrypt | 在 `requirements.txt` 显式列出 |
-| 运行 | gunicorn（Compose 内）/ `flask run`（本地开发） | Compose 内绑定 `0.0.0.0:8080` |
+| 前端 | React 18 + TypeScript + Vite；react-markdown + remark-gfm；原生 CSS | 登录页、材料页；Markdown 详情渲染；深浅色主题 |
+| 后端 | Go + 标准库 `net/http`（不引入 Web 框架）；MySQL 驱动；`golang.org/x/crypto/bcrypt` | HTTP API、业务逻辑、口令哈希 |
+| 数据 | MySQL 8.0 | 用户、班级、会话、材料、知识库正文 |
+| 入口 | Nginx | 托管前端构建产物；同源反向代理 `/api` 与 `/health` |
+| 部署 | Docker Compose | 统一构建并启动 web、api、db |
 
-**备选：** Node + Express + better-sqlite3。行为等价即可；选 Python 以减少课程环境差异。若换栈，须同步改 tasks 中的命令，spec 不变。
+**理由：** 后续迭代要做检索并支持多连接，MySQL 比 SQLite 的文件锁更合适，Compose 环境与生产也更等价；前后端分离后信任边界清晰地落在 API 层。选的都是各自位置上最主流的方案，把注意力留给"谁能看到什么数据"。
+**备选：** 保留 Flask + SQLite 单体——更轻、无需独立 db 容器，但与本课需求的架构不一致，且 SQLite 在 Compose 多进程下的等价性较弱，故不采用。
 
-### Decision 2：服务端签名会话（而非 JWT）
+### Decision 2：登录态用服务端会话 + Cookie，不用 JWT
 
-- 登录成功后写入 Flask signed cookie session，设置 `HttpOnly`、`SameSite=Lax`；payload 至少含 `user_id`、`role`（`teacher` | `student`）、`class_id`。
-- 签名密钥 `SECRET_KEY` **只从环境变量读取**；应用启动时若缺失则直接报错退出，不回退到默认值。
-- 受保护路由统一前置校验（`login_required` 装饰器）：无有效会话时，页面请求 `302` 到 `/login`，API 请求返回 `401` JSON，且不渲染任何业务数据。
-- 登出：`POST /logout` 清除会话并重定向到 `/login`。
+- 会话存 MySQL `sessions` 表：随机不可猜的会话 ID（≥ 32 字节随机数），关联 `user_id`、过期时间；TTL 由环境变量 `SESSION_TTL` 配置。
+- Cookie：`HttpOnly`、`SameSite=Lax`、`Path=/`；本地 HTTP 环境不设 `Secure`（HTTPS 不在本迭代）。
+- 登录成功时签发**新**会话 ID，并删除该用户携带的旧会话，防止会话固定。
+- 登出：删除服务端会话行并清 Cookie；之后再用同一 Cookie 请求一律 401。
+- 每次请求由中间件查 `sessions` 表并联表取 `role`、`class_id`，写入请求上下文；角色和班级**只**从这里取。
 
-**备选：** JWT。本项目为同源服务端渲染，cookie 会话更简单，也便于服务端立即失效。
+**备选：** JWT —— 无法在服务端立即作废（登出后旧 token 仍有效），会让"登出后旧 Cookie 失效"无法判定；localStorage 存 token 还会暴露给 XSS。故不采用。
 
-### Decision 3：密码哈希存储
+### Decision 3：口令与登录防护
 
-- 用户表只有 `password_hash` 列，不存在明文 `password` 列。
-- 种子脚本写入哈希；登录用库函数校验（如 `check_password_hash` / `bcrypt.checkpw`），依赖库的恒定时间比较。
-- 登录失败统一返回"用户名或密码错误"，不区分是用户不存在还是密码错误。
+- 口令只存 bcrypt 哈希（`users.password_hash`）；预置账号口令从环境变量 `SEED_TEACHER_A_PASSWORD`、`SEED_STUDENT_A1_PASSWORD`、`SEED_STUDENT_B1_PASSWORD` 读取。
+- 登录失败统一返回 401 与同一文案"用户名或密码错误"；用户不存在时也对一个固定假哈希做一次 bcrypt 比较，使耗时相近，避免枚举账号。
+- 限流：按"用户名 + 客户端 IP"统计连续失败次数，达到 `LOGIN_MAX_FAILURES`（默认 5）后锁定 `LOGIN_LOCK_SECONDS`（默认 300 秒）；锁定期内即使口令正确也拒绝，响应与凭据错误**完全一致**。单实例，计数放内存即可（见 Risks）。
 
-**备选：** 仅 PBKDF2 手写实现——易出错，不采用。
+### Decision 4：班级隔离 —— 单库 + class_id，先取行再校验
 
-### Decision 4：单库 + `class_id` 过滤实现班级隔离
+- 班级只来自会话；query、Header、表单中的 `class_id` 一律忽略。
+- 列表：SQL 强制 `WHERE class_id = ?`，参数取自会话。
+- 按 ID 访问（详情、文件下载）：先按 `id` 取行（不在 SQL 里预先过滤班级），再比较 `row.class_id` 与会话班级；**不存在或跨班都返回 404**，响应体完全相同，不含对方任何字段。
+- 写入：新材料与知识库条目的 `class_id` 只取自会话。
+- `materials.class_id`、`knowledge_entries.class_id` 非空且建索引。
 
-隔离 **MUST 在服务端实现**，前端隐藏按钮不算。
+**备选：** 跨班返回 403 —— 会暴露"该 ID 存在"，故统一 404，并写入 README。
 
-- **列表查询**：统一封装 `list_materials(class_id)`，SQL 强制 `WHERE class_id = ?`，参数只来自 `session['class_id']`。
-- **按 ID 访问**：先按 `id` 查行；不存在返回 `404`；`row.class_id != session['class_id']` 时**统一返回 `404`**（不暴露他班资源是否存在），响应体不含他班标题、正文或路径。该约定同时写入 README。
-- **写入**：新记录的 `class_id` 只取自会话；表单或 query 中的 `class_id` 一律忽略。
-- 不提供"代传他班"或管理员跨班 API。
-
-**备选：** 每班一个独立数据库——隔离更强但运维与种子复杂，不适合当前规模。
-
-### Decision 5：上传与入库数据流
+### Decision 5：上传与入库
 
 ```
-Client (teacher, multipart/form-data)
-POST /api/materials
-  │
-  ├─ login_required；role != teacher → 403（不落盘、不写库）
-  ├─ 校验扩展名（.txt / .md）、非空、大小 ≤ 2 MB，否则 400
-  ├─ 保存 uploads/{class_id}/{uuid}_{safe_filename}
-  ├─ 解析为 UTF-8 纯文本；失败 → 删除已存文件，返回 400，不写库
-  ├─ BEGIN TRANSACTION
-  │    INSERT materials (title, class_id, file_path, uploaded_by, created_at)
-  │    INSERT knowledge_entries (material_id, class_id, body_text, created_at)
-  ├─ COMMIT（任一步失败 → ROLLBACK 并删除文件，返回 500）
-  └─ 201 {"material_id": ...}
-
-Client GET /materials（HTML）或 GET /api/materials（JSON）
-  ├─ login_required
-  ├─ rows = list_materials(session.class_id)
-  └─ 200
+POST /api/materials  (multipart/form-data, 字段 file、可选 title)
+  ├─ 会话校验：无会话 → 401
+  ├─ 角色校验：role != teacher → 403（尚未读取请求体、未落盘、未写库）
+  ├─ http.MaxBytesReader(MAX_UPLOAD_BYTES)：超限 → 413（读完整请求体之前拒绝）
+  ├─ 扩展名白名单 .txt / .md，否则 400
+  ├─ 内容非空且为合法 UTF-8，否则 400
+  ├─ 存储名由服务端生成：{UPLOAD_DIR}/{class_id}/{uuid}.{ext}；客户端文件名只作展示标题
+  ├─ BEGIN
+  │    INSERT materials(title, class_id, stored_name, original_name, size, uploaded_by, created_at)
+  │    INSERT knowledge_entries(material_id, class_id, body_text, created_at)
+  ├─ COMMIT；任何一步失败 → ROLLBACK + 删除已写文件 → 4xx/5xx
+  └─ 201 {"id": ..., "title": ...}
 ```
 
-- 标题：优先取表单字段 `title`，缺省用文件名（去扩展名）。
-- 知识库：MVP 写入解析后的全文 `body_text`；分块、向量化、RAG 不在本 change。
-- 学生与教师共用列表接口；学生页面不渲染上传表单，服务端仍拒绝其写请求。
+- 能在落盘前完成的校验都放在落盘前。
+- 详情接口返回标题、班级、上传时间与知识库正文，**不**返回磁盘路径。
+- 下载 `GET /api/materials/{id}/file` 经会话 + 班级校验后由 Go 读文件返回；Nginx **不**把上传目录作为静态目录暴露，上传目录只挂载到 api 容器。
 
-### Decision 6：数据模型
+### Decision 6：数据模型（MySQL 8.0，utf8mb4）
 
-| 表 | 关键字段 | 说明 |
+| 表 | 关键字段 |
+| --- | --- |
+| `classes` | id, name UNIQUE |
+| `users` | id, username UNIQUE, password_hash, role ENUM('teacher','student'), class_id FK |
+| `sessions` | id (随机串 PK), user_id FK, expires_at, created_at |
+| `materials` | id, class_id FK NOT NULL + INDEX, title, stored_name, original_name, size_bytes, uploaded_by FK, created_at |
+| `knowledge_entries` | id, material_id FK UNIQUE, class_id NOT NULL + INDEX, body_text MEDIUMTEXT, created_at |
+
+- 种子：班级 A/B；teacher_a（A）、student_a1（A）、student_b1（B）；A 班、B 班各一条标题含「A 班」「B 班」的材料及对应知识库正文。
+- 种子**幂等**：以唯一键判断，重复启动不重复插入、不覆盖已上传内容。
+- 应用使用普通数据库账号（仅本库的增删改查权限），不使用 root；MySQL root 口令不下发给 api。
+
+### Decision 7：部署拓扑与接口
+
+```
+浏览器 ──:8080──▶ web (Nginx：静态前端 + 反代 /api、/health)
+                     │
+                     ▼
+                  api (Go :8081，不映射宿主端口)  ── 上传目录 volume（仅挂 api）
+                     │
+                     ▼
+                  db (MySQL 8.0，不映射宿主端口) ── 数据 volume
+```
+
+| 方法与路径 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `classes` | id, name | 预置班级 A、班级 B |
-| `users` | id, username UNIQUE, password_hash, role, class_id | 预置 teacher_a、student_a1、student_b1 |
-| `materials` | id, title, class_id, file_path, uploaded_by, created_at | 教学材料元数据 |
-| `knowledge_entries` | id, material_id, class_id, body_text, created_at | 知识库条目 |
-| `lectures` / `assignments` / `assistants` / `skills` | id, class_id, title 等 | 六类核心结构中的占位表，可各含 0~1 行 |
+| POST /api/login | 无 | 校验口令、限流、签发新会话 |
+| POST /api/logout | 会话 | 删除服务端会话并清 Cookie |
+| GET /api/me | 会话 | 返回 username、role、class_id、班级名 |
+| GET /api/materials | 会话 | 本班列表，可带 `q` 按标题筛选（仅本班范围） |
+| GET /api/materials/{id} | 会话 + 班级 | 详情与知识库正文；跨班或不存在 404 |
+| GET /api/materials/{id}/file | 会话 + 班级 | 下载原文件；跨班或不存在 404 |
+| POST /api/materials | 会话 + 教师 | 上传入库 |
+| GET /health | 无 | 存活判定，返回 `{"status":"ok"}` |
 
-种子材料：A 班、B 班各至少一条，标题分别含「A 班」「B 班」，并在 `knowledge_entries` 中有对应条目。
+- 开发时 Vite 代理 `/api`、`/health` 到后端，路径与生产 Nginx 一致。
+- 数据库不可用时，业务接口返回 503，而不是把已登录用户判成 401。
+- 环境变量（`.env.example` 全部列出，不含真实值）：`SESSION_SECRET`、`SESSION_TTL`、`DB_HOST`、`DB_NAME`、`DB_USER`、`DB_PASSWORD`、`MYSQL_ROOT_PASSWORD`（只给 db）、`UPLOAD_DIR`、`MAX_UPLOAD_BYTES`（默认 2 MB）、`LOGIN_MAX_FAILURES`、`LOGIN_LOCK_SECONDS`、`SEED_*_PASSWORD`、`WEB_PORT`（默认 8080）。必需项缺失时 api 启动失败并打印缺失的变量名，不使用内置默认密钥。
 
-### Decision 7：Docker Compose 与 `GET /health`
-
-- `Dockerfile`：基于 `python:3.12-slim`，安装依赖，复制 `app/`、`scripts/`，`CMD` 启动 gunicorn。
-- `docker-compose.yml`：service `app`，`build: .`，`ports: ["8080:8080"]`，`env_file: .env`，`volumes: ./data:/app/data`、`./uploads:/app/uploads`，`healthcheck` 调用 `http://127.0.0.1:8080/health`。
-- 启动入口：若 `data/app.db` 不存在，先运行 `python scripts/init_db.py` 建表并写种子，再启动服务。
-- `.env.example`：列出 `SECRET_KEY=`（占位）与 `DATABASE_PATH=data/app.db`，不含真实密钥；`.env` 加入 `.gitignore`。
-- `GET /health`：无需登录，返回 `200` 与 `{"status":"ok"}`；数据库文件不可读时返回 `503`。
-
-### 建议模块划分
+### 建议目录
 
 ```
-app/
-  __init__.py      # create_app()，校验 SECRET_KEY
-  auth.py          # /login、/logout、login_required、role_required
-  materials.py     # 列表、按 id 查看、上传
-  knowledge.py     # parse_file()、写入 knowledge_entries
-  db.py            # 连接与带 class_id 的查询封装
-  templates/       # login.html、materials.html
-scripts/init_db.py # 建表 + 种子
+backend/
+  cmd/server/main.go
+  internal/{config,db,auth,materials,knowledge}/
+  migrations/  seed/
+  Dockerfile
+frontend/
+  src/{pages,components,api}/
+  nginx.conf  Dockerfile  vite.config.ts
+docker-compose.yml  .env.example  .gitignore  .dockerignore
 ```
 
 ## Risks / Trade-offs
 
-- [PDF/Word 解析复杂] → 首版只支持 `.txt` / `.md`；失败时 spec 要求不留脏数据。
-- [跨班返回 403 还是 404 不一致] → 本 design 固定为 404，并写入 README 与 tasks 验收。
-- [SQLite 并发写有限] → 课程演示规模可接受；后续如需扩展再换数据库。
-- [Flask 开发服务器不适合容器] → Compose 内使用 gunicorn。
-- [会话密钥泄露或弱密钥] → 只从环境变量读取，缺失即启动失败；`.env` 不入库。
+- [限流计数在内存，重启清零] → 单实例可接受；多副本需要改为共享存储，不在本迭代。
+- [MySQL 首次启动需几十秒，入口短暂 502] → api 启动时重试连接数据库；Compose 为 db 配 healthcheck，api `depends_on` 条件为 healthy；README 说明。
+- [8080 端口被占用] → 用 `WEB_PORT` 修改。
+- [本地 HTTP 下 Cookie 无 Secure] → 仅限本地演示；HTTPS 在后续课程。
+- [Markdown 渲染 XSS] → react-markdown 默认不渲染原始 HTML，保持该默认，不开启 `rehype-raw`。
 
 ## Migration Plan
 
-从零起步，无旧数据迁移：`init_db.py` 建表并写种子。实现顺序见 `tasks.md`：数据 → 登录 → 隔离 → 上传 → Compose → validate。回滚方式：`docker compose down` 后删除 `data/` 与 `uploads/` 即可恢复初始状态。
+从零起步，无旧数据；第 2 课初稿中的 Flask/SQLite 设计仅存在于规约，未产生代码，无需迁移。实现顺序见 `tasks.md` §1–§9。回滚：`docker compose down -v` 清空数据卷即回到初始状态。
