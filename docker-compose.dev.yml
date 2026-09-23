@@ -1,0 +1,42 @@
+# 开发期本地调试专用：将 api、db 端口绑定到 127.0.0.1，方便直接用 curl / mysql 客户端调试。
+# 正式交付只用 docker-compose.yml（仅暴露 web）。
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    image: golang:1.24
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+      - uploaddata:${UPLOAD_DIR}
+    command: ["go", "run", "./cmd/server"]
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+    ports:
+      - "127.0.0.1:${API_PORT:-8081}:${API_PORT:-8081}"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  dbdata:
+  uploaddata:
