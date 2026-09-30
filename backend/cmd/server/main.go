@@ -13,6 +13,7 @@ import (
 	"campusclaw/backend/internal/httpapi"
 	"campusclaw/backend/internal/index"
 	"campusclaw/backend/internal/materials"
+	"campusclaw/backend/internal/search"
 	"campusclaw/backend/internal/vector"
 	"campusclaw/backend/migrations"
 	"campusclaw/backend/seed"
@@ -82,6 +83,7 @@ func main() {
 	requireAuth := auth.RequireAuth(conn, tokenIssuer)
 
 	materialsHandlers := materials.NewHandlers(conn, indexer, vectorClient)
+	searchHandlers := search.NewHandlers()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -103,6 +105,7 @@ func main() {
 		MaxUploadBytes: cfg.MaxUploadBytes,
 	})))
 	apiMux.Handle("POST /api/materials/{id}/reindex", requireAuth(http.HandlerFunc(materialsHandlers.Reindex)))
+	apiMux.Handle("POST /api/search", requireAuth(http.HandlerFunc(searchHandlers.Search)))
 	mux.Handle("/api/", httpapi.NoStore(apiMux))
 
 	addr := ":" + cfg.APIPort
