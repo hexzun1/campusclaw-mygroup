@@ -44,7 +44,7 @@
 - [x] 6.3 向量库不可用时重建不破坏现状；MySQL 步骤失败时旧切片置 `failed` — verify: `docker compose stop qdrant` 后 teacher_a 重建得 503，该材料的切片 ID 集合与重建前相同；恢复后再次重建成功
 - [ ] 6.4 用重建修复失败的索引 — verify: 打开嵌入失败开关上传得到 `failed` 切片；关闭开关后对该材料重建，聚合 `index_status` 变为 `indexed`
 - [x] 6.5 实现启动补偿扫描：为没有切片的 `knowledge_entries` 按 `auto` 生成切片并索引，重试遗留的 `pending` 切片；幂等 — verify: 删除某存量材料的全部切片后重启 api，切片重新出现；连续重启两次后切片总数不变；把某切片手工置 `pending` 后重启变为 `indexed`
-- [ ] 6.6 种子接入补偿扫描（预置材料同样有切片；网关 / 向量库不可用时种子仍完成） — verify: `docker compose down -v` 后全新启动，两条预置材料各有切片且属于对应班级；关闭桩后 `down -v` 再启动，api 正常启动、预置切片为 `failed`、`keyword` 能命中；重启不产生重复切片
+- [x] 6.6 种子接入补偿扫描（预置材料同样有切片；网关 / 向量库不可用时种子仍完成） — verify: `docker compose down -v` 后全新启动，两条预置材料各有切片且属于对应班级；关闭桩后 `down -v` 再启动，api 正常启动、预置切片为 `failed`、`keyword` 能命中；重启不产生重复切片
 
 ## 7. 检索
 
