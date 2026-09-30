@@ -26,7 +26,7 @@
 ## 4. 外部服务客户端
 
 - [x] 4.1 实现嵌入客户端（OpenAI 兼容 `/embeddings`、按 `EMBEDDING_BATCH_SIZE` 分批、超时、校验返回维度，网络 / 5xx / 维度不符统一归为"依赖不可用"错误，不把地址与密钥写进错误文本） — verify: 对网关桩：返回向量长度等于 DIM；打开桩的嵌入失败开关后返回可被 `errors.Is(err, ErrUnavailable)` 识别的错误；错误字符串不含桩地址与密钥
-- [ ] 4.2 实现 Qdrant 客户端（标准库 REST）：惰性确保集合 `campusclaw_chunks`（Cosine、`EMBEDDING_DIM`、`class_id`/`material_id` payload 索引，维度不符按依赖不可用处理）、批量 upsert（`wait=true`）、带 `class_id` 过滤与 0.35 阈值的检索、按 `(material_id, class_id)` 删除 — verify: 对 dev 的 qdrant：upsert 一个点后 `GET /collections/campusclaw_chunks/points/<id>` 的 payload 键集合恰为 `class_id, material_id, knowledge_entry_id, chunk_id, chunk_index`；用 A 班 filter 检索不返回 B 班的点；按材料删除后该材料的点数为 0
+- [x] 4.2 实现 Qdrant 客户端（标准库 REST）：惰性确保集合 `campusclaw_chunks`（Cosine、`EMBEDDING_DIM`、`class_id`/`material_id` payload 索引，维度不符按依赖不可用处理）、批量 upsert（`wait=true`）、带 `class_id` 过滤与 0.35 阈值的检索、按 `(material_id, class_id)` 删除 — verify: 对 dev 的 qdrant：upsert 一个点后 `GET /collections/campusclaw_chunks/points/<id>` 的 payload 键集合恰为 `class_id, material_id, knowledge_entry_id, chunk_id, chunk_index`；用 A 班 filter 检索不返回 B 班的点；按材料删除后该材料的点数为 0
 - [ ] 4.3 实现对话客户端（OpenAI 兼容 `/chat/completions`、非流式、超时、失败归为"依赖不可用"） — verify: 对网关桩调用一次，`$STUB/stats` 的对话计数 +1 且返回文本非空；打开对话失败开关后返回 `ErrUnavailable`
 
 ## 5. 索引流水线与上传
