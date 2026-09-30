@@ -13,7 +13,7 @@
 
 - [x] 2.1 实现启动时迁移执行器：`go:embed` 内置 `migrations/*.sql`，`schema_migrations(version)` 记录已执行版本，按文件名顺序执行未记录的文件，迁移连接单独启用 `multiStatements` — verify: 在含迭代 1 数据的现有数据卷上启动 api 两次，`schema_migrations` 每个版本恰一行，`users`、`materials` 行数与启动前相同
 - [x] 2.2 编写 `002_knowledge_chunks.sql`：新建 `knowledge_chunks`（含 `FULLTEXT ... WITH PARSER ngram`、`UNIQUE(knowledge_entry_id, chunk_index)`、`KEY(class_id, index_status)`，`class_id` 非空）；`knowledge_entries` 增加 `chunk_strategy`（默认 `auto`）与 `chunk_params` — verify: `SHOW CREATE TABLE knowledge_chunks` 含 `ngram` 与上述键；`SELECT DISTINCT chunk_strategy FROM knowledge_entries` 对存量行只返回 `auto`
-- [ ] 2.3 `internal/db` 增加切片读写：批量插入、按材料替换（事务内删旧插新并更新策略字段）、按材料列出、更新状态、聚合状态与计数、按 ID 集合取切片（**强制 `class_id` 条件并 JOIN `materials` 比对班级**） — verify: 临时测试对班级 A 传入 B 班切片 ID 集合，`GetChunksByIDs` 返回 0 行；替换操作对 A 班材料执行后旧切片 ID 全部不存在
+- [x] 2.3 `internal/db` 增加切片读写：批量插入、按材料替换（事务内删旧插新并更新策略字段）、按材料列出、更新状态、聚合状态与计数、按 ID 集合取切片（**强制 `class_id` 条件并 JOIN `materials` 比对班级**） — verify: 临时测试对班级 A 传入 B 班切片 ID 集合，`GetChunksByIDs` 返回 0 行；替换操作对 A 班材料执行后旧切片 ID 全部不存在
 - [ ] 2.4 `internal/db` 增加关键词查询：`MATCH ... AGAINST` 自然语言模式，`WHERE class_id = ?`，取前 50；单字符查询走转义后的 `LIKE` 兜底，同样带班级条件 — verify: 临时测试对班级 A 查询只出现在 B 班预置材料里的词，返回 0 行；查询 A 班预置材料里的双字词返回 ≥ 1 行；单字符查询同样只返回 A 班行
 
 ## 3. 切分
