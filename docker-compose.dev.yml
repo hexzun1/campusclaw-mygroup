@@ -1,4 +1,4 @@
-# 开发期本地调试专用：将 api、db 端口绑定到 127.0.0.1，方便直接用 curl / mysql 客户端调试。
+# 开发期本地调试专用：将 api、db、qdrant 与网关桩的端口绑定到 127.0.0.1，方便直接用 curl / mysql 客户端调试。
 # 正式交付只用 docker-compose.yml（仅暴露 web）。
 services:
   db:
@@ -19,6 +19,27 @@ services:
       timeout: 5s
       retries: 20
 
+  # 与正式编排同名同镜像，只多一条 127.0.0.1 绑定，便于直接 curl 调试。
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrantdata:/qdrant/storage
+
+  # 仅供开发与验收的确定性网关桩（design.md Decision 11）。它不进入正式编排，
+  # 也不进生产镜像；维度跟随 .env 中的 EMBEDDING_DIM。
+  stubgateway:
+    image: golang:1.24
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    command: ["go", "run", "./cmd/stubgateway", "-addr", ":8090"]
+    environment:
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-256}
+    ports:
+      - "127.0.0.1:8090:8090"
+
   api:
     image: golang:1.24
     working_dir: /app
@@ -29,14 +50,21 @@ services:
     env_file:
       - .env
     environment:
+      # 服务名只在编排内可解析，故在此显式给出，不依赖 .env 的取值。
       DB_HOST: db
       DB_PORT: 3306
+      QDRANT_URL: http://qdrant:6333
     ports:
       - "127.0.0.1:${API_PORT:-8081}:${API_PORT:-8081}"
     depends_on:
       db:
         condition: service_healthy
+      qdrant:
+        condition: service_started
+      stubgateway:
+        condition: service_started
 
 volumes:
   dbdata:
   uploaddata:
+  qdrantdata:

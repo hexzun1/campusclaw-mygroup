@@ -1,4 +1,4 @@
-# 正式交付：只暴露 web 端口，db 与 api 均不映射到宿主机。
+# 正式交付：只暴露 web 端口，db、api 与 qdrant 均不映射到宿主机。
 services:
   db:
     image: mysql:8.0
@@ -17,6 +17,15 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # 向量库。不写 ports：浏览器与宿主机都不直连，只有 api 经服务名访问
+  # （design.md Decision 3 与 Decision 10）。depends_on 只用 service_started，
+  # 因为 qdrant 起得比 api 慢、也可能整体不可用，而 api 在这种情况下仍须能启动。
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    volumes:
+      - qdrantdata:/qdrant/storage
+    restart: unless-stopped
+
   api:
     build:
       context: ./backend
@@ -25,11 +34,14 @@ services:
     environment:
       DB_HOST: db
       DB_PORT: 3306
+      QDRANT_URL: http://qdrant:6333
     volumes:
       - uploaddata:${UPLOAD_DIR}
     depends_on:
       db:
         condition: service_healthy
+      qdrant:
+        condition: service_started
     restart: unless-stopped
 
   web:
@@ -44,3 +56,4 @@ services:
 volumes:
   dbdata:
   uploaddata:
+  qdrantdata:
