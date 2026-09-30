@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"campusclaw/backend/internal/db"
@@ -131,7 +132,7 @@ func New(conn *sql.DB, embedder Embedder, vectors VectorStore) *Engine {
 }
 
 // Search runs one validated query and returns the traceable hits of classID, at
-// most req.TopK of them.
+// most req.TopK of them. Hybrid is the default mode.
 func (e *Engine) Search(ctx context.Context, classID int, req Request) ([]Hit, error) {
 	switch req.Mode {
 	case ModeKeyword:
@@ -139,9 +140,7 @@ func (e *Engine) Search(ctx context.Context, classID int, req Request) ([]Hit, e
 	case ModeVector:
 		return e.vector(ctx, classID, req)
 	}
-	// The hybrid mode fuses the two branches by rank; a request that cannot
-	// resolve any yields no hits rather than an error.
-	return []Hit{}, nil
+	return e.hybrid(ctx, classID, req)
 }
 
 // keyword resolves the keyword mode: the MySQL full-text branch, capped at the
@@ -220,6 +219,64 @@ func (e *Engine) vectorCandidates(ctx context.Context, classID int, query string
 		found = append(found, row)
 	}
 	return found, nil
+}
+
+// hybrid resolves the default mode: each branch is ranked on its own, the two
+// are fused by rank, and the requested result count caps the list. A branch that
+// cannot produce its candidates fails the whole request — the mode never
+// degrades into the other branch silently (spec: 依赖不可用时的降级).
+func (e *Engine) hybrid(ctx context.Context, classID int, req Request) ([]Hit, error) {
+	keywordRows, err := e.keywordCandidates(ctx, classID, req.Query)
+	if err != nil {
+		return nil, err
+	}
+	vectorRows, err := e.vectorCandidates(ctx, classID, req.Query)
+	if err != nil {
+		return nil, err
+	}
+	return toHits(fuseRRF(keywordRows, vectorRows), req.TopK), nil
+}
+
+// rrfK damps the contribution of a rank in the fusion; 60 is the value the
+// requirement names.
+const rrfK = 60
+
+// fuseRRF merges ranked branches by reciprocal rank fusion (spec: 混合检索):
+// a chunk scores the sum of 1/(k+rank) over the branches it appears in, ranks
+// counted from 1. The list is ordered by score descending and, on equal scores,
+// by chunk ID ascending. A chunk that only one branch returned keeps its single
+// rank score, and an empty branch contributes nothing, so a one-branch result
+// is exactly that branch's ranking.
+func fuseRRF(branches ...[]db.ChunkHit) []db.ChunkHit {
+	type entry struct {
+		hit   db.ChunkHit
+		score float64
+	}
+
+	byID := make(map[int64]*entry)
+	for _, branch := range branches {
+		for rank, hit := range branch {
+			fused, ok := byID[hit.ID]
+			if !ok {
+				fused = &entry{hit: hit}
+				byID[hit.ID] = fused
+			}
+			fused.score += 1 / float64(rrfK+rank+1)
+		}
+	}
+
+	out := make([]db.ChunkHit, 0, len(byID))
+	for _, fused := range byID {
+		fused.hit.Score = fused.score
+		out = append(out, fused.hit)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
 }
 
 // Hit is one traceable search result: the material it came from, the chunk and

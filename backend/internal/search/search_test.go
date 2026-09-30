@@ -87,6 +87,74 @@ func TestParseRequestRejects(t *testing.T) {
 	}
 }
 
+func ids(hits []Hit) []int64 {
+	out := make([]int64, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.ChunkID)
+	}
+	return out
+}
+
+func chunkHit(id int64) db.ChunkHit {
+	return db.ChunkHit{Chunk: db.Chunk{ID: id}}
+}
+
+func TestFuseRRF(t *testing.T) {
+	// In one branch, both chunks rank (1, 2); the other branch returns chunk 11
+	// at rank 2 and pushes its own first chunk above it.
+	keyword := []db.ChunkHit{chunkHit(11), chunkHit(12)}
+	vector := []db.ChunkHit{chunkHit(13), chunkHit(11)}
+
+	fused := fuseRRF(keyword, vector)
+
+	// 11: 1/61 + 1/62, 13: 1/61, 12: 1/62.
+	wantOrder := []int64{11, 13, 12}
+	if got := ids(toHits(fused, len(fused))); !equalIDs(got, wantOrder) {
+		t.Fatalf("fused order = %v, want %v", got, wantOrder)
+	}
+
+	wantScores := map[int64]float64{
+		11: 1.0/61 + 1.0/62,
+		13: 1.0 / 61,
+		12: 1.0 / 62,
+	}
+	for _, hit := range fused {
+		if diff := hit.Score - wantScores[hit.ID]; diff > 1e-9 || diff < -1e-9 {
+			t.Errorf("chunk %d score = %v, want %v", hit.ID, hit.Score, wantScores[hit.ID])
+		}
+	}
+}
+
+func TestFuseRRFTiesBreakByID(t *testing.T) {
+	fused := fuseRRF([]db.ChunkHit{chunkHit(22)}, []db.ChunkHit{chunkHit(21)})
+	if got := ids(toHits(fused, len(fused))); !equalIDs(got, []int64{21, 22}) {
+		t.Errorf("tied chunks ordered %v, want ID ascending [21 22]", got)
+	}
+}
+
+func TestFuseRRFWithOneEmptyBranch(t *testing.T) {
+	keyword := []db.ChunkHit{chunkHit(11), chunkHit(12)}
+	fused := fuseRRF(keyword, nil)
+	if got := ids(toHits(fused, len(fused))); !equalIDs(got, []int64{11, 12}) {
+		t.Fatalf("order = %v, want the keyword ranking [11 12]", got)
+	}
+	if diff := fused[0].Score - 1.0/61; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("first score = %v, want 1/61", fused[0].Score)
+	}
+}
+
+func equalIDs(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestToHitsCapsAndProjects(t *testing.T) {
 	rows := []db.ChunkHit{
 		{Chunk: db.Chunk{ID: 7, MaterialID: 3, ChunkIndex: 1, CharStart: 10, CharEnd: 20, ChunkText: "第一段正文"}, MaterialTitle: "材料一", Score: 1.5},
