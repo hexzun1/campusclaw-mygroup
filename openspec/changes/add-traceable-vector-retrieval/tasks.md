@@ -33,7 +33,7 @@
 
 - [x] 5.1 实现索引器：读取材料的 `pending` 切片，按批嵌入 → upsert → 置 `indexed`；任一批失败则该批及其后未处理的切片置 `failed` 并停止；使用 `context.WithoutCancel` 加 `INDEX_TIMEOUT_SECONDS` 超时；同一材料用进程内互斥锁串行 — verify: 桩正常时一份 3 片的材料切片全为 `indexed` 且 Qdrant 点数为 3；打开嵌入失败开关后同样的材料切片全为 `failed`、MySQL 行仍在
 - [x] 5.2 上传接入切分参数与索引：参数解析放在落盘之前，事务内写 `materials`、`knowledge_entries`（含策略字段）、`knowledge_chunks(pending)`，提交后调用索引器，响应 `201 {id, title, index_status}` — verify: teacher_a 上传 2000 字 `.md`：三表各增行、切片区间为 `[0,800) [720,1520) [1440,2000)`、`class_id` 均为 A 班、响应 `index_status` 为 `indexed`
-- [ ] 5.3 非法切分参数与索引失败的边界 — verify: 上传时片长 50 / 重叠 60 / 未知策略各得 400，三张表行数与 `uploads/` 文件数前后不变；打开嵌入失败开关后上传合法文件得 201，`materials` 行保留、切片全 `failed`，且用 `keyword` 检索该材料的词能命中（见 7.2 前先用 SQL 直接确认切片存在）
+- [x] 5.3 非法切分参数与索引失败的边界 — verify: 上传时片长 50 / 重叠 60 / 未知策略各得 400，三张表行数与 `uploads/` 文件数前后不变；打开嵌入失败开关后上传合法文件得 201，`materials` 行保留、切片全 `failed`，且用 `keyword` 检索该材料的词能命中（见 7.2 前先用 SQL 直接确认切片存在）
 - [ ] 5.4 向量主键与 payload 约束的端到端核对 — verify: 上传后取该材料某切片的 MySQL `id`，Qdrant 中同 ID 的点存在，其 payload 键集合恰为五个约定键且不含正文（`curl` 点详情后 `grep` 正文片段无输出）
 - [ ] 5.5 预处理不改正文 — verify: teacher_a 以 `custom`、开启移除 URL 与折叠空白上传含 URL 的 `.md`：`knowledge_entries.body_text` 与上传文件 `diff` 无输出；对应 `chunk_text` 不含 `http`
 
