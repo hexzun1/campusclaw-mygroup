@@ -3,6 +3,8 @@ package search
 import (
 	"strings"
 	"testing"
+
+	"campusclaw/backend/internal/db"
 )
 
 func TestParseRequestDefaults(t *testing.T) {
@@ -82,6 +84,26 @@ func TestParseRequestRejects(t *testing.T) {
 				t.Errorf("ParseRequest(%s) = nil error, want a rejection", tt.body)
 			}
 		})
+	}
+}
+
+func TestToHitsCapsAndProjects(t *testing.T) {
+	rows := []db.ChunkHit{
+		{Chunk: db.Chunk{ID: 7, MaterialID: 3, ChunkIndex: 1, CharStart: 10, CharEnd: 20, ChunkText: "第一段正文"}, MaterialTitle: "材料一", Score: 1.5},
+		{Chunk: db.Chunk{ID: 8, MaterialID: 3, ChunkIndex: 2, CharStart: 20, CharEnd: 30, ChunkText: "第二段正文"}, MaterialTitle: "材料一", Score: 0.5},
+	}
+
+	hits := toHits(rows, 1)
+	if len(hits) != 1 {
+		t.Fatalf("toHits returned %d hits, want 1", len(hits))
+	}
+	want := Hit{MaterialID: 3, MaterialTitle: "材料一", ChunkID: 7, ChunkIndex: 1, CharStart: 10, CharEnd: 20, Excerpt: "第一段正文", Score: 1.5}
+	if hits[0] != want {
+		t.Errorf("hits[0] = %+v, want %+v", hits[0], want)
+	}
+
+	if empty := toHits(nil, 5); empty == nil || len(empty) != 0 {
+		t.Errorf("toHits(nil) = %v, want a non-nil empty slice", empty)
 	}
 }
 

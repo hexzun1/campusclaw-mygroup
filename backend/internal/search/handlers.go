@@ -2,6 +2,7 @@ package search
 
 import (
 	"io"
+	"log"
 	"net/http"
 
 	"campusclaw/backend/internal/httpapi"
@@ -11,11 +12,13 @@ import (
 // and a result count, nothing more.
 const maxSearchBodyBytes = 8 << 10
 
-// Handlers serves the retrieval API.
-type Handlers struct{}
+// Handlers wraps an engine in HTTP.
+type Handlers struct {
+	Engine *Engine
+}
 
 // NewHandlers builds the retrieval handlers.
-func NewHandlers() *Handlers { return &Handlers{} }
+func NewHandlers(engine *Engine) *Handlers { return &Handlers{Engine: engine} }
 
 // searchResponse is the body of POST /api/search. A result-less response keeps
 // the 200 status and adds the hint text, so an empty result never discloses
@@ -32,6 +35,8 @@ type searchResponse struct {
 // The class scope is the session's alone; a class_id in the query string,
 // headers or body is ignored (spec: 检索的权限与班级范围).
 func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
+	su := httpapi.SessionUserFromContext(r.Context())
+
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSearchBodyBytes))
 	if err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, "请求格式错误")
@@ -44,7 +49,16 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeResults(w, req.Mode, []Hit{})
+	hits, err := h.Engine.Search(r.Context(), su.ClassID, req)
+	if err != nil {
+		// The cause is logged server-side only; the response must not name a
+		// dependency, its address or its key (spec: 依赖不可用时的降级).
+		log.Printf("search: %v", err)
+		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
+		return
+	}
+
+	writeResults(w, req.Mode, hits)
 }
 
 // writeResults renders a search outcome: the hits, or the not-found hint when

@@ -10,6 +10,8 @@
 package search
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +105,39 @@ func ParseRequest(body []byte) (Request, error) {
 	return Request{Query: query, Mode: mode, TopK: topK}, nil
 }
 
+// Engine resolves queries for one class. It is the shared core of the search
+// endpoint and of the ask pipeline.
+type Engine struct {
+	conn *sql.DB
+}
+
+// New builds an engine over the given database.
+func New(conn *sql.DB) *Engine { return &Engine{conn: conn} }
+
+// Search runs one validated query and returns the traceable hits of classID, at
+// most req.TopK of them.
+func (e *Engine) Search(ctx context.Context, classID int, req Request) ([]Hit, error) {
+	switch req.Mode {
+	case ModeKeyword:
+		return e.keyword(ctx, classID, req)
+	}
+	// The vector and hybrid modes take their candidates from the embedding
+	// gateway and the vector store; a request that cannot resolve any yields
+	// no hits rather than an error.
+	return []Hit{}, nil
+}
+
+// keyword resolves the MySQL full-text branch. It never calls the embedding
+// gateway or the vector store, so it stays available when either is down
+// (spec: 关键词检索).
+func (e *Engine) keyword(ctx context.Context, classID int, req Request) ([]Hit, error) {
+	found, err := db.SearchChunksByKeyword(ctx, e.conn, classID, req.Query, db.KeywordLimit)
+	if err != nil {
+		return nil, err
+	}
+	return toHits(found, req.TopK), nil
+}
+
 // Hit is one traceable search result: the material it came from, the chunk and
 // its position inside the material, and an excerpt of the chunk text read from
 // MySQL. Vectors, filesystem paths and the vector store's address are
@@ -116,6 +151,19 @@ type Hit struct {
 	CharEnd       int     `json:"char_end"`
 	Excerpt       string  `json:"excerpt"`
 	Score         float64 `json:"score"`
+}
+
+// toHits projects database rows into the response shape, capped at topK. The
+// result is never nil, so it always marshals as a JSON array.
+func toHits(rows []db.ChunkHit, topK int) []Hit {
+	if len(rows) > topK {
+		rows = rows[:topK]
+	}
+	hits := make([]Hit, 0, len(rows))
+	for _, row := range rows {
+		hits = append(hits, toHit(row))
+	}
+	return hits
 }
 
 // toHit projects a database row into the response shape.
