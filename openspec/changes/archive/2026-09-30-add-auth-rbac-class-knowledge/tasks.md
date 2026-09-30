@@ -77,5 +77,5 @@
 - [x] 9.3 在 `docs/iteration-1.md` 用自己的话写三项设计决策（技术栈、会话方案、跨班 404）及否决的备选 — verify: 三项各含"决策 / 备选 / 理由"
 - [x] 9.4 确认仓库无真实密钥 — verify: `git ls-files | grep -x .env` 无输出；`git grep -n "SESSION_SECRET="` 只出现在 `.env.example` 且值为占位
 - [ ] 9.5 同伴交叉验证：请同伴用本仓库与预置账号试一条跨班 URL — verify: 迭代说明记录同伴姓名与结论（返回 404）
-- [ ] 9.6 打 tag `v0.1.0-auth-upload` 并推送 — verify: `git tag` 列出该 tag；从 tag 检出后按 README 可启动
-- [ ] 9.7 执行 `/opsx:archive` 归档本 change — verify: `openspec list` 无活动变更；`openspec/specs/auth-upload/spec.md` 已生成且与 delta 一致
+- [x] 9.6 打 tag `v0.1.0-auth-upload` 并推送 — verify: `git tag` 列出该 tag；从 tag 检出后按 README 可启动 —— **已执行：tag 在本地与远端均存在，指向 323f9ce「feat: implement auth, RBAC, class isolation and material upload (iteration 1)」且是 main 的祖先**
+- [x] 9.7 执行 `/opsx:archive` 归档本 change — verify: `openspec list` 无活动变更；`openspec/specs/auth-upload/spec.md` 已生成且与 delta 一致 —— **2026-09-30 归档：主规格由 delta 的 10 条 ADDED 需求生成（39 个场景，逐条一致），change 移至 `archive/2026-09-30-add-auth-rbac-class-knowledge/`**

@@ -8,6 +8,7 @@
 
 - 迭代 1（v0.1.0-auth-upload）：登录与角色权限、班级数据隔离、材料上传与知识库入库。规约见 `openspec/changes/add-auth-rbac-class-knowledge/`。
 - 迭代 2（v0.2.0-vector-retrieval）：正文切片与向量索引、班级内检索（关键词 / 向量 / 混合）、带引用的问答。规约见 `openspec/changes/add-traceable-vector-retrieval/`。
+- 迭代 3（v0.3.0-knowledge-qa-ui）：新增「知识检索」与「知识问答」两个前端页面（三种检索模式、带出处的回答卡片、每题独立且不保存历史）。规约见 `openspec/changes/add-knowledge-qa-ui/`。
 
 - 技术栈：React + TypeScript + Vite（前端）/ Go net/http（后端）/ MySQL 8.0 / Qdrant 向量库 / Nginx / Docker Compose
 - 部署形态：单实例 Docker Compose，只暴露 web 端口（默认 8080）
@@ -41,6 +42,18 @@ docker compose -f docker-compose.dev.yml up -d
 - 端口只绑 `127.0.0.1`：api → 8081、db → 3306、qdrant → 6333、网关桩 → 8090
 - 网关桩（源码在 `backend/cmd/stubgateway`）是确定性实现：`/embeddings` 把字符二元组哈希成 `EMBEDDING_DIM` 维向量；`/chat/completions` 回显服务端给出的资料编号；`GET /stats` 查看两个接口的调用计数与最近一次请求体；`POST /control` 切换故障：`{"embed_fail":true}`、`{"chat_fail":true}`、`{"out_of_range_citation":true}`
 - 用桩时把 `.env` 里的 `EMBEDDING_BASE_URL` 与 `CHAT_BASE_URL` 改为 `http://stubgateway:8090`，密钥随意；桩只存在于开发编排与源码，不进正式镜像
+
+### 页面用法：知识检索与知识问答
+
+登录后页面顶部有三个标签：「材料」「知识检索」「知识问答」，教师与学生看到并可以使用的功能相同。
+
+- **知识检索**（`/search`）：输入问句（最长 500 字，去掉空白为空时不提交），选择模式后提交；结果按接口顺序逐条给出材料标题、切片序号、字符区间与摘录。三种模式：
+  - 混合（`hybrid`，默认）：关键词与向量两路各取候选、融合排序；
+  - 关键词（`keyword`）：只查 MySQL 全文索引，向量库或嵌入网关不可用时仍可用；
+  - 向量（`vector`）：语义相似检索，依赖嵌入网关与向量库。
+- **知识问答**（`/ask`）：就本班材料提问（最长 1000 字）。每个问题独立提交：请求只带当前问题，不带此前对话，问答**不保存历史**（刷新或切换标签后清空）；有依据时显示「依据回答」卡片与按顺序编号 `[1]`、`[2]`… 的出处列表，没有命中时不调用模型，只显示「资料中未找到相关内容」。
+- 两个页面都只把接口返回的内容按纯文本显示（不解析 HTML / Markdown），并原样保留接口给出的顺序与编号。
+- 接口返回 **503**（向量库或网关不可用）时页面显示「检索服务暂不可用」：在检索页换用「关键词」模式仍可正常使用。
 
 ### 用 curl 调接口
 
@@ -126,4 +139,4 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" $API/api/logout
 - **单实例部署**：当前只支持单个 api/db 实例（登录限流计数在内存中，重启会清零），不做多副本、公网证书与 CI/CD，详见 `openspec/changes/add-auth-rbac-class-knowledge/proposal.md` 的 Non-goals。
 - **MySQL 首次启动较慢**：db 容器首次初始化建表可能需要几十秒，此时访问 web 可能短暂看到 502，等待 `docker compose ps` 中 db 变为 `healthy` 后即可正常访问。
 - **修改端口**：如需更换对外端口，在 `.env` 中设置 `WEB_PORT` 后重新 `docker compose up -d` 即可，无需改动 compose 文件。
-- **迭代 2 不做**：重排序（结果只按 RRF 融合）、跨班检索（含教师）、流式输出（`/api/ask` 一次性返回 JSON）、多轮记忆与 Agent、PDF/Word 等新文件类型（仍只支持 `.txt` / `.md`）、检索与问答的前端页面（接口可用，界面未做）、异步索引队列（上传请求内同步完成索引）。
+- **迭代 2 不做**：重排序（结果只按 RRF 融合）、跨班检索（含教师）、流式输出（`/api/ask` 一次性返回 JSON）、多轮记忆与 Agent、PDF/Word 等新文件类型（仍只支持 `.txt` / `.md`）、检索与问答的前端页面（接口可用，页面已由迭代 3 的 `add-knowledge-qa-ui` 提供）、异步索引队列（上传请求内同步完成索引）。

@@ -1,5 +1,7 @@
 # 迭代 2 说明（v0.2.0-vector-retrieval）
 
+> 注：「不做前端检索页」这一非目标已被 add-knowledge-qa-ui 取代（迭代 3 已提供「知识检索」与「知识问答」页面）。
+
 规约：`openspec/changes/add-traceable-vector-retrieval/`
 
 ## 关键 Scenario 验收

@@ -59,4 +59,4 @@
 - [x] 8.4 在 `docs/iteration-1.md` 顶部加一句说明"登录会话方案已被 switch-to-jwt-bearer-auth 取代，Cookie 相关命令与决策 2 仅作历史记录" — verify: 打开文件首屏可见该说明，其余内容未改动
 - [x] 8.5 运行 `openspec validate switch-to-jwt-bearer-auth --strict` — verify: 退出码 0 且无 error（"auth-upload 主规格尚不存在"的 INFO 提示属预期，见 8.7）
 - [x] 8.6 确认仓库无真实密钥 — verify: `git ls-files | grep -x .env` 无输出；`git grep -n "JWT_SECRET="` 只出现在 `.env.example` 且值为占位；`git grep -n "Bearer ey"` 无输出
-- [ ] 8.7 归档本 change。**前置：`add-auth-rbac-class-knowledge` 已归档**；需使用者明确指示后执行 `/opsx:archive` — verify: `openspec list` 中无本 change；`openspec/specs/auth-upload/spec.md` 的「登录与会话」「角色权限」「班级隔离」「口令与密钥安全」「前端页面行为」已是 JWT 版本，并含「浏览器端防护响应头」
+- [x] 8.7 归档本 change。**前置：`add-auth-rbac-class-knowledge` 已归档**；需使用者明确指示后执行 `/opsx:archive` — verify: `openspec list` 中无本 change；`openspec/specs/auth-upload/spec.md` 的「登录与会话」「角色权限」「班级隔离」「口令与密钥安全」「前端页面行为」已是 JWT 版本，并含「浏览器端防护响应头」 —— **2026-09-30 归档：5 处 MODIFIED 逐块替换、1 处 ADDED 追加（共 11 需求），替换块与 delta 逐字节一致，未触碰的 5 个需求保持原样；change 移至 `archive/2026-09-30-switch-to-jwt-bearer-auth/`**

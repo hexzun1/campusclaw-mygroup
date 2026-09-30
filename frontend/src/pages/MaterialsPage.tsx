@@ -11,10 +11,9 @@ import {
   type MaterialSummary,
 } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
-import ThemeToggle from '../components/ThemeToggle'
 
 export default function MaterialsPage() {
-  const { user, logout } = useAuth()
+  const { user } = useAuth()
   const [query, setQuery] = useState('')
   const [materials, setMaterials] = useState<MaterialSummary[]>([])
   const [selected, setSelected] = useState<MaterialDetail | null>(null)
@@ -81,19 +80,8 @@ export default function MaterialsPage() {
   }
 
   return (
-    <div className="materials-page">
-      <header className="materials-header">
-        <h1>{user?.class_name} 教学材料</h1>
-        <div className="header-actions">
-          <span className="who-am-i">
-            {user?.username}（{user?.role === 'teacher' ? '教师' : '学生'}）
-          </span>
-          <ThemeToggle />
-          <button type="button" onClick={logout}>
-            登出
-          </button>
-        </div>
-      </header>
+    <>
+      <h1>{user?.class_name} 教学材料</h1>
 
       <input
         className="search-box"
@@ -145,6 +133,6 @@ export default function MaterialsPage() {
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }

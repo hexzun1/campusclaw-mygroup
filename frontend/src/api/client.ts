@@ -27,6 +27,33 @@ export interface LoginResponse {
   role: 'teacher' | 'student'
 }
 
+export type SearchMode = 'hybrid' | 'keyword' | 'vector'
+
+// Hit is one traceable result: the material it came from, the chunk position
+// inside it and an excerpt read from MySQL. Search hits and ask citations share
+// this shape.
+export interface Hit {
+  material_id: number
+  material_title: string
+  chunk_id: number
+  chunk_index: number
+  char_start: number
+  char_end: number
+  excerpt: string
+  score: number
+}
+
+export interface SearchResponse {
+  mode: SearchMode
+  hits: Hit[]
+  message?: string
+}
+
+export interface AskResponse {
+  answer: string
+  citations: Hit[]
+}
+
 // The only Web Storage key the app uses, and it holds nothing but the token.
 const TOKEN_KEY = 'campusclaw_token'
 
@@ -131,6 +158,40 @@ export async function uploadMaterial(file: File, title: string): Promise<{ id: n
     method: 'POST',
     body: form,
   })
+}
+
+// searchKnowledge and askKnowledge send only what the endpoints accept: the
+// class scope comes from the bearer token, never from the body.
+export function searchKnowledge(query: string, mode: SearchMode, signal?: AbortSignal) {
+  return request<SearchResponse>('/api/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, mode }),
+    signal,
+  })
+}
+
+export function askKnowledge(question: string, signal?: AbortSignal) {
+  return request<AskResponse>('/api/ask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question }),
+    signal,
+  })
+}
+
+// failureText maps a failed request to the text a page displays, or null when
+// nothing is shown: a 401 has already cleared the token and returned to the
+// login page, and an aborted request belongs to a page that is going away. The
+// 503 text is fixed so no dependency detail can surface on a page.
+export function failureText(err: unknown): string | null {
+  if (err instanceof DOMException && err.name === 'AbortError') return null
+  if (err instanceof ApiError) {
+    if (err.status === 401) return null
+    if (err.status === 503) return '检索服务暂不可用'
+    if (err.status === 400) return err.message
+  }
+  return '请求失败，请稍后重试'
 }
 
 // filenameFromDisposition reads the RFC 5987 `filename*` value first (UTF-8
