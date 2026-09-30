@@ -52,7 +52,7 @@
 - [x] 7.2 实现 `keyword` 模式（不调用嵌入网关与向量库） — verify: student_a1 检索 A 班材料里的双字词得 200 且命中均为 A 班切片、正文含该词；检索只在 B 班出现的词得 200、`hits` 为空；`docker compose stop qdrant` 并关闭桩后同样的 `keyword` 请求仍得 200 且结果不变
 - [x] 7.3 实现 `vector` 模式（嵌入查询 → Qdrant 带班级过滤与 0.35 阈值 → MySQL 回表并再次按班级过滤，保持 Qdrant 顺序，丢弃 MySQL 里不存在的点） — verify: 用 A 班切片的原句检索得 ≥ 1 条命中；用与所有材料无关的乱码检索得 200 且 `hits` 为空；临时把某 A 班切片的 `class_id` 改成 B 班后同一检索不再返回它（改回后恢复）；删除某切片 MySQL 行而保留向量点后检索不返回它
 - [x] 7.4 实现 RRF 融合与 `hybrid`（两路各取前 50，名次从 1 起，`1/(60+rank)` 求和，降序、同分按切片 ID 升序，一路为空取另一路） — verify: `go test` 断言名次 (1,2) 的切片得 `1/61+1/62`、仅一路出现名次 2 的得 `1/62` 且前者在前；同分按 ID 升序；一路为空时等于另一路；集成：不带 `mode` 与 `mode=hybrid` 结果相同
-- [ ] 7.5 命中结果的溯源字段 — verify: 每条命中含 `material_id`、材料标题、`chunk_id`、`chunk_index`、`char_start`、`char_end`、摘录（`chunk_text` 前 300 字，超出加 `…`）；脚本对未预处理材料校验：摘录是详情 `body` 中 `[char_start, char_end)` 字符的前缀；`hits` 中无任何向量或路径字段
+- [x] 7.5 命中结果的溯源字段 — verify: 每条命中含 `material_id`、材料标题、`chunk_id`、`chunk_index`、`char_start`、`char_end`、摘录（`chunk_text` 前 300 字，超出加 `…`）；脚本对未预处理材料校验：摘录是详情 `body` 中 `[char_start, char_end)` 字符的前缀；`hits` 中无任何向量或路径字段
 - [ ] 7.6 依赖不可用的降级 — verify: `docker compose stop qdrant` 后 `vector`、`hybrid` 得 503，`keyword` 得 200，之后 `GET /api/me` 仍得 200；打开桩的嵌入失败开关后同样如此；503 响应体 `grep` 不出现 `qdrant`、`6333`、`api-key`、桩地址
 - [ ] 7.7 权限与班级范围 — verify: 不带 Cookie 调用得 401 且响应体无标题 / 摘录；student_a1 在 query、Header、请求体里附带 B 班 ID 的结果与不带时 `diff` 无输出；student_a1 与 student_b1 对同一查询词的结果互不含对方班级的切片；teacher_a 同样只见 A 班
 
