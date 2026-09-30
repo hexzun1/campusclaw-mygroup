@@ -36,6 +36,14 @@ const (
 
 	materialBTitle = "B 班教学材料示例"
 	materialBBody  = "# B 班材料\n\n这是 B 班的示例教学材料，用于验证班级隔离。"
+
+	// materialB2Title/materialB2Body carry wording that appears in no class-A
+	// material, so acceptance can check that B-class content stays invisible to
+	// A-class users while B-class users can retrieve it (spec: 他班内容检索不到).
+	// Class B has no teacher account, so a class-B-only statement can only come
+	// from the seed.
+	materialB2Title = "B 班天文观测安排"
+	materialB2Body  = "# B 班天文观测安排\n\n本学期的天文观测活动改在山顶观测站集合，请自带红色头灯并穿着保暖衣物。\n"
 )
 
 // Run seeds classes, users and sample materials. It is safe to call on every
@@ -69,6 +77,9 @@ func Run(ctx context.Context, conn *sql.DB, cfg Config) error {
 	}
 	if err := ensureMaterial(ctx, conn, cfg.UploadDir, classB.ID, materialBTitle, materialBBody, studentB1.ID); err != nil {
 		return fmt.Errorf("ensure material B: %w", err)
+	}
+	if err := ensureMaterial(ctx, conn, cfg.UploadDir, classB.ID, materialB2Title, materialB2Body, studentB1.ID); err != nil {
+		return fmt.Errorf("ensure material B2: %w", err)
 	}
 
 	return nil
