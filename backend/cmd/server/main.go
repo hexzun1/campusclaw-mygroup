@@ -53,11 +53,6 @@ func main() {
 		log.Fatalf("seed: %v", err)
 	}
 
-	limiter := auth.NewLoginLimiter(cfg.LoginMaxFailures, cfg.LoginLockSeconds)
-	tokenIssuer := auth.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL)
-	authHandlers := auth.NewHandlers(conn, tokenIssuer, limiter)
-	requireAuth := auth.RequireAuth(conn, tokenIssuer)
-
 	// External services are constructed but not contacted here: the vector
 	// collection is ensured on first use, so the api starts even when Qdrant or
 	// a gateway is down (design.md Decision 3).
@@ -71,6 +66,20 @@ func main() {
 	})
 	vectorClient := vector.NewClient(cfg.QdrantURL, cfg.QdrantAPIKey, cfg.EmbeddingDim, cfg.GatewayTimeout)
 	indexer := index.New(index.SQLChunkStore{Conn: conn}, embeddingClient, vectorClient, cfg.EmbeddingBatchSize, cfg.IndexTimeout)
+
+	// Startup compensation scan (design.md Decision 6): materials that predate
+	// the vector pipeline get their chunks generated and indexed, and indexing
+	// runs that were interrupted mid-way are finished. It is idempotent, and a
+	// gateway or vector store being down only marks the affected chunks failed —
+	// the api still starts and keyword search still works.
+	if err := index.Reconcile(context.Background(), index.SQLReconcileStore{Conn: conn}, indexer); err != nil {
+		log.Printf("startup reconcile: %v", err)
+	}
+
+	limiter := auth.NewLoginLimiter(cfg.LoginMaxFailures, cfg.LoginLockSeconds)
+	tokenIssuer := auth.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL)
+	authHandlers := auth.NewHandlers(conn, tokenIssuer, limiter)
+	requireAuth := auth.RequireAuth(conn, tokenIssuer)
 
 	materialsHandlers := materials.NewHandlers(conn, indexer, vectorClient)
 
