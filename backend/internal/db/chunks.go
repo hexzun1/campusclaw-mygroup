@@ -39,10 +39,14 @@ type Chunk struct {
 }
 
 // ChunkHit is a chunk joined with the title of its material, which is what
-// search results and answers need to be traceable.
+// search results and answers need to be traceable. Score carries the relevance
+// value of the mode that produced the hit (full-text relevance, cosine or RRF
+// sum); it is informational and its scale differs per mode
+// (design.md Decision 8).
 type ChunkHit struct {
 	Chunk
 	MaterialTitle string
+	Score         float64
 }
 
 // ChunkStats is the aggregate index state of one material.
