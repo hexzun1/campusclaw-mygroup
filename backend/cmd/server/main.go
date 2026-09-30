@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 
+	"campusclaw/backend/internal/ask"
 	"campusclaw/backend/internal/auth"
 	"campusclaw/backend/internal/config"
 	"campusclaw/backend/internal/db"
@@ -66,6 +67,12 @@ func main() {
 		Timeout: cfg.GatewayTimeout,
 	})
 	vectorClient := vector.NewClient(cfg.QdrantURL, cfg.QdrantAPIKey, cfg.EmbeddingDim, cfg.GatewayTimeout)
+	chatClient := gateway.NewChatClient(gateway.ChatConfig{
+		BaseURL: cfg.ChatBaseURL,
+		APIKey:  cfg.ChatAPIKey,
+		Model:   cfg.ChatModel,
+		Timeout: cfg.GatewayTimeout,
+	})
 	indexer := index.New(index.SQLChunkStore{Conn: conn}, embeddingClient, vectorClient, cfg.EmbeddingBatchSize, cfg.IndexTimeout)
 
 	// Startup compensation scan (design.md Decision 6): materials that predate
@@ -83,7 +90,9 @@ func main() {
 	requireAuth := auth.RequireAuth(conn, tokenIssuer)
 
 	materialsHandlers := materials.NewHandlers(conn, indexer, vectorClient)
-	searchHandlers := search.NewHandlers(search.New(conn, embeddingClient, vectorClient))
+	searchEngine := search.New(conn, embeddingClient, vectorClient)
+	searchHandlers := search.NewHandlers(searchEngine)
+	askHandlers := ask.NewHandlers(ask.New(searchEngine, chatClient))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +115,7 @@ func main() {
 	})))
 	apiMux.Handle("POST /api/materials/{id}/reindex", requireAuth(http.HandlerFunc(materialsHandlers.Reindex)))
 	apiMux.Handle("POST /api/search", requireAuth(http.HandlerFunc(searchHandlers.Search)))
+	apiMux.Handle("POST /api/ask", requireAuth(http.HandlerFunc(askHandlers.Ask)))
 	mux.Handle("/api/", httpapi.NoStore(apiMux))
 
 	addr := ":" + cfg.APIPort
