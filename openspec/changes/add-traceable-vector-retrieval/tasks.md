@@ -75,7 +75,7 @@
 ## 10. 文档与发布
 
 - [x] 10.1 README 补充：新增变量、Qdrant 与网关桩、检索 / 重建 / 问答的 curl 示例、切分策略说明、"更换嵌入模型需删集合并重建"、本迭代不做项 — verify: 依 README 中的 curl 示例从零跑通一次上传 → 检索 → 问答
-- [ ] 10.2 编写 `docs/iteration-2.md`：关键 Scenario（跨班空结果、`keyword` 在依赖故障下可用、`vector`/`hybrid` 503、阈值丢弃、RRF 分数、无依据不调用模型、system 消息被丢弃、payload 无正文）的命令与输出，以及三项设计决策（同步索引、预处理后置以保证可溯源、RRF）及否决的备选 — verify: 每条 Scenario 都有"通过 / 不通过"结论与命令输出；三项决策各含"决策 / 备选 / 理由"
+- [x] 10.2 编写 `docs/iteration-2.md`：关键 Scenario（跨班空结果、`keyword` 在依赖故障下可用、`vector`/`hybrid` 503、阈值丢弃、RRF 分数、无依据不调用模型、system 消息被丢弃、payload 无正文）的命令与输出，以及三项设计决策（同步索引、预处理后置以保证可溯源、RRF）及否决的备选 — verify: 每条 Scenario 都有"通过 / 不通过"结论与命令输出；三项决策各含"决策 / 备选 / 理由"
 - [ ] 10.3 运行 `openspec validate add-traceable-vector-retrieval --strict` — verify: 退出码 0 且无 error（`auth-upload` MODIFIED 的"归档前需要主规格"提示属预期，见 10.5）
 - [ ] 10.4 确认仓库无真实密钥 — verify: `git ls-files | grep -x .env` 无输出；`git grep -n "API_KEY="` 只出现在 `.env.example` 且值为占位
 - [ ] 10.5 用真实网关做一次冒烟（不进入自动验收）并记录结果 — verify: 用真实嵌入与对话网关上传一份材料、检索、提问各一次，`docs/iteration-2.md` 记录是否成功与模型名（不写密钥）
