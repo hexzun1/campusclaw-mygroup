@@ -12,9 +12,7 @@ import (
 // Open connects to MySQL and retries for a while, since the db container can
 // take tens of seconds to become ready on first start (see design.md Risks).
 func Open(host, port, name, user, password string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4", user, password, host, port, name)
-
-	sqlDB, err := sql.Open("mysql", dsn)
+	sqlDB, err := sql.Open("mysql", dsn(host, port, name, user, password, false))
 	if err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
 	}
@@ -30,4 +28,15 @@ func Open(host, port, name, user, password string) (*sql.DB, error) {
 		time.Sleep(2 * time.Second)
 	}
 	return nil, fmt.Errorf("db ping failed after %d attempts: %w", maxAttempts, pingErr)
+}
+
+// dsn builds the MySQL connection string. multiStatements is enabled only for
+// the migration connection, where a single file holds several statements;
+// ordinary queries keep it off so one statement per call stays enforced.
+func dsn(host, port, name, user, password string, multiStatements bool) string {
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4", user, password, host, port, name)
+	if multiStatements {
+		dsn += "&multiStatements=true"
+	}
+	return dsn
 }

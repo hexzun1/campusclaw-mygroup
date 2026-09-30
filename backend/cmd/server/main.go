@@ -11,6 +11,7 @@ import (
 	"campusclaw/backend/internal/db"
 	"campusclaw/backend/internal/httpapi"
 	"campusclaw/backend/internal/materials"
+	"campusclaw/backend/migrations"
 	"campusclaw/backend/seed"
 )
 
@@ -26,6 +27,13 @@ func main() {
 		log.Fatalf("connect db: %v", err)
 	}
 	defer conn.Close()
+
+	// Apply pending migrations before anything reads the schema. The MySQL
+	// image's initdb.d scripts only run on an empty data volume, so an existing
+	// volume depends entirely on this step (design.md Decision 2).
+	if err := db.Migrate(context.Background(), cfg.DBHost, cfg.DBPort, cfg.DBName, cfg.DBUser, cfg.DBPassword, migrations.FS); err != nil {
+		log.Fatalf("migrate: %v", err)
+	}
 
 	// Idempotent startup DDL: existing data volumes never re-run the MySQL
 	// image's initdb.d scripts (design.md Decision 3).
