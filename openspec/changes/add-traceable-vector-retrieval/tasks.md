@@ -66,7 +66,7 @@
 
 ## 9. 综合验收与部署
 
-- [ ] 9.1 跨班全链路（`keyword`/`vector`/`hybrid`/`ask` 四条路径）— verify: 脚本以 student_a1 检索 B 班预置材料独有的语句，三种模式均 200 空结果，问答的桩对话计数不变；以 student_b1 检索同一语句均能命中 B 班
+- [x] 9.1 跨班全链路（`keyword`/`vector`/`hybrid`/`ask` 四条路径）— verify: 脚本以 student_a1 检索 B 班预置材料独有的语句，三种模式均 200 空结果，问答的桩对话计数不变；以 student_b1 检索同一语句均能命中 B 班
 - [ ] 9.2 生产编排只暴露 web — verify: `docker compose up --build -d` 后 `docker compose port qdrant 6333` 与 `6334`、`docker compose port api 8081` 均无输出；`lsof -iTCP -sTCP:LISTEN -P | grep -E ':(3306|6333|6334|8081)\b'` 无输出；`http://localhost:8080/health` 仍返回 `{"status":"ok"}`
 - [ ] 9.3 重建后数据仍在 — verify: 上传并索引一份材料后 `docker compose down && docker compose up -d`（不带 `-v`），该材料 `vector` 检索仍命中、`index_status` 仍为 `indexed`
 - [ ] 9.4 嵌入维度变更的行为 — verify: 把 `EMBEDDING_DIM` 改为另一个值重启 api：`vector`/`hybrid` 得 503、`keyword` 得 200，日志明确指出维度不符（不含密钥）；改回后恢复
