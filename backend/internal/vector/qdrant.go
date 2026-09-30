@@ -238,7 +238,14 @@ func (c *Client) DeleteByMaterial(ctx context.Context, materialID, classID int) 
 	}
 
 	path := "/collections/" + CollectionName + "/points/delete?wait=true"
-	if _, err := c.do(ctx, http.MethodPost, path, body, nil); err != nil {
+	status, err := c.do(ctx, http.MethodPost, path, body, nil)
+	if err != nil {
+		// A missing collection means nothing is left to delete: after an
+		// embedding-model change the collection is deleted on purpose, and the
+		// next upsert recreates it (README: 更换嵌入模型需删集合并重建).
+		if status == http.StatusNotFound {
+			return nil
+		}
 		return upstream.Unavailable("the vectors could not be deleted", causeOf(err))
 	}
 	return nil

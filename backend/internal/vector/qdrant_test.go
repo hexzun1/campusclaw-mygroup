@@ -300,6 +300,29 @@ func TestDeleteByMaterialSendsBothConditions(t *testing.T) {
 	}
 }
 
+func TestDeleteByMaterialTreatsMissingCollectionAsNoop(t *testing.T) {
+	srv, fake := newFakeQdrant(t, true, 4)
+	fake.failStatus = http.StatusNotFound
+	fake.failPath = "/collections/" + CollectionName + "/points/delete"
+
+	client := NewClient(srv.URL, "", 4, 5*time.Second)
+	if err := client.DeleteByMaterial(context.Background(), 7, 3); err != nil {
+		t.Fatalf("a missing collection means nothing to delete, got: %v", err)
+	}
+}
+
+func TestDeleteByMaterialReportsRealFailures(t *testing.T) {
+	srv, fake := newFakeQdrant(t, true, 4)
+	fake.failStatus = http.StatusInternalServerError
+	fake.failPath = "/collections/" + CollectionName + "/points/delete"
+
+	client := NewClient(srv.URL, "qdrant-secret-key", 4, 5*time.Second)
+	err := client.DeleteByMaterial(context.Background(), 7, 3)
+	if !errors.Is(err, upstream.ErrUnavailable) {
+		t.Fatalf("error = %v, want upstream.ErrUnavailable", err)
+	}
+}
+
 func TestUnreachableVectorStoreIsSanitized(t *testing.T) {
 	srv, _ := newFakeQdrant(t, true, 4)
 	client := NewClient(srv.URL, "qdrant-secret-key", 4, 2*time.Second)

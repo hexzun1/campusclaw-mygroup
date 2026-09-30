@@ -152,17 +152,59 @@ payload: {"chunk_id": 14, "chunk_index": 0, "class_id": 1, "knowledge_entry_id":
 - **备选**：加权分数融合（MySQL 全文相关度 × w1 + 余弦 × w2）。
 - **理由**：两路输出不同量纲——全文相关度是一个无上界的启发式分数，余弦在 [-1,1]——加权需要先归一化再调 w1/w2，参数没有客观依据且每次改切分策略都可能要重调；RRF 只消费名次，天然无参数，也正好是需求指定的做法（k=60）。不静默退化是刻意的：检索范围突然变小而不报错，会让使用者对"没搜到"产生错误结论。
 
-## 真实网关冒烟（未执行）
+## 真实网关冒烟（已执行，2026-09-30）
 
-`tasks.md` 10.5 要求用真实嵌入与对话网关上传一份材料、检索、提问各一次，并记录是否成功与模型名。
+`tasks.md` 10.5 要求用真实嵌入与对话网关上传一份材料、检索、提问各一次，并记录是否成功与模型名。**本节是唯一一次接真实网关的执行；上文全部自动验收仍基于确定性网关桩完成，与真实网关无关。**
 
-**结论：不适用（未执行）**——本机没有可用的真实网关（拿不到嵌入 / 对话网关的地址与密钥），本节不填冒烟结果；上文全部自动验收基于确定性网关桩完成，与真实网关无关。
+环境：正式编排 `docker compose up --build -d`（`localhost:8080`），`.env` 填入真实网关凭据（密钥只在本机环境变量，下文不出现），嵌入模型 `course-embedding`（`EMBEDDING_DIM=2048`）、对话模型 `course-chat`；教师 `teacher_a` 的 Bearer token；上传文本 `smoke.md`（标题「校运会安排（真实网关冒烟）」）。
 
-将来拿到真实网关凭据后的执行方式（按 README 流程）：
+### 1. 上传（真实嵌入）
 
-1. 在 `.env` 中填入真实网关的 `EMBEDDING_BASE_URL/API_KEY/MODEL/DIM` 与 `CHAT_BASE_URL/API_KEY/MODEL`（密钥只放本机环境变量，不进仓库）并重启 api；
-2. 更换嵌入模型或维度后，按 README「更换嵌入模型需删集合并重建」先删除 Qdrant 集合（或数据卷）再重建索引；
-3. 按 README 的 curl 示例做上传 → 检索 → 提问各一次，在本节记录是否成功与模型名（不写密钥）。
+```
+$ curl -s -X POST -H "Authorization: Bearer $T" \
+    -F 'file=@smoke.md;type=text/markdown' -F 'title=校运会安排（真实网关冒烟）' \
+    http://localhost:8080/api/materials
+{"id":13,"index_status":"indexed","title":"校运会安排（真实网关冒烟）"}
+```
+
+**结论：通过**。同步索引返回 `indexed`，说明切片已由 `course-embedding` 生成 2048 维向量并写入 Qdrant（集合在首次写入时按新维度重建）。
+
+### 2. 检索（hybrid，真实嵌入）
+
+```
+$ curl -s -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+    -d '{"query":"校运会在哪里举行","mode":"hybrid","top_k":5}' \
+    http://localhost:8080/api/search
+mode: hybrid
+hits: 2
+ - material_id 13 chunk 0 score=0.03252247488101534   （= 1/61 + 1/62，两路相加）
+ - material_id 12 chunk 0 score=0.01639344262295082   （= 1/61，仅 keyword 路）
+```
+
+**结论：通过**。材料 13 同时被 keyword 与 vector 两路命中，RRF 分与前文桩验收的公式逐位一致；材料 12（先前嵌入失败、无向量）仍经 keyword 路命中——真实数据上再次验证了「keyword 路径不依赖索引状态」。
+
+### 3. 提问（真实对话网关）
+
+```
+$ curl -s -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+    -d '{"question":"校运会什么时候、在哪里举行？"}' \
+    http://localhost:8080/api/ask
+answer: 本次校运会在十月十七日于学校田径场举行[1][2]。
+citations: 2
+ - material_id 13 chunk 0 chars 0-71
+ - material_id 12 chunk 0 chars 0-71
+```
+
+**结论：通过**。`course-chat` 基于命中切片作答，文中 `[1][2]` 与服务端 `citations` 一一对应，内容未超出材料（问题里的"什么时候"对应"十月十七日"、地点对应"学校田径场"）。
+
+### 冒烟中发现并修复的两个缺陷
+
+1. **生产镜像缺 CA 证书**：api 镜像是 `FROM scratch`，不含 `/etc/ssl/certs`，一切 HTTPS 调用（嵌入、对话）都在 TLS 握手前失败，表现为 `the gateway is unreachable`。此前自动验收全走明文 HTTP 桩，这个缺陷一直不可见。修复：构建阶段拷入 `ca-certificates.crt`（`backend/Dockerfile`）。
+2. **模型切换后重建无法删除旧向量**：按 README「更换嵌入模型需删集合并重建」删掉 Qdrant 集合后再重建，`DeleteByMaterial` 收到 404 被当成故障（`the vectors could not be deleted`），文档化的流程被自己挡住。修复：集合不存在视为"无可删"，返回成功（下次写入会自动重建集合），并补两个单测（`backend/internal/vector/qdrant_test.go`）。
+
+### 冒烟后的数据状态
+
+本轮只上传了材料 13；切换真实模型前删过集合，因此材料 13 之外的历史材料（迭代 1 种子材料、材料 11/12 等）目前没有 2048 维向量：`keyword` 不受影响，`vector`/`hybrid` 只能命中材料 13。需要时按 README 流程对历史材料逐个重建（会消耗真实网关调用额度），本轮未做。
 
 ## 已知限制
 
