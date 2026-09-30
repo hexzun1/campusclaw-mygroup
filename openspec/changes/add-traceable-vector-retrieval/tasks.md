@@ -6,7 +6,7 @@
 
 - [x] 1.1 扩展 `internal/config`：新增必需项 `QDRANT_URL`、`EMBEDDING_BASE_URL/API_KEY/MODEL/DIM`、`CHAT_BASE_URL/API_KEY/MODEL`，可选项 `QDRANT_API_KEY`、`EMBEDDING_BATCH_SIZE`（32）、`GATEWAY_TIMEOUT_SECONDS`（30）、`INDEX_TIMEOUT_SECONDS`（120）；`EMBEDDING_DIM` 必须是正整数 — verify: `go test ./internal/config` 覆盖"缺任一必需项报错且列出变量名""DIM 非数字报错""全部提供则通过"；不设 `EMBEDDING_API_KEY` 运行 `go run ./cmd/server` 以非 0 退出，输出含 `EMBEDDING_API_KEY`
 - [x] 1.2 `.env.example` 补充上述全部变量名与占位值，README 之外不写任何真实值 — verify: `grep -c = .env.example` ≥ 29；`git ls-files | grep -x .env` 无输出
-- [ ] 1.3 编写开发 / 验收用确定性网关桩 `backend/cmd/stubgateway`（标准库）：`POST /embeddings` 把字符二元组哈希进 `EMBEDDING_DIM` 维并归一化，`POST /chat/completions` 按收到的资料编号回显并输出 `[n]`，`GET /stats` 返回两个接口各自的调用次数与最近一次请求体，`POST /control` 可切换"嵌入失败 / 对话失败 / 输出越界引用 [9]" — verify: `go test ./cmd/stubgateway` 断言"相同文本向量相同、维度等于 DIM、相似文本余弦 > 0.35、无关文本余弦 < 0.35"；启动后 `curl $STUB/stats` 显示计数，切换失败开关后 `/embeddings` 返回 500
+- [x] 1.3 编写开发 / 验收用确定性网关桩 `backend/cmd/stubgateway`（标准库）：`POST /embeddings` 把字符二元组哈希进 `EMBEDDING_DIM` 维并归一化，`POST /chat/completions` 按收到的资料编号回显并输出 `[n]`，`GET /stats` 返回两个接口各自的调用次数与最近一次请求体，`POST /control` 可切换"嵌入失败 / 对话失败 / 输出越界引用 [9]" — verify: `go test ./cmd/stubgateway` 断言"相同文本向量相同、维度等于 DIM、相似文本余弦 > 0.35、无关文本余弦 < 0.35"；启动后 `curl $STUB/stats` 显示计数，切换失败开关后 `/embeddings` 返回 500
 - [ ] 1.4 `docker-compose.yml` 增加 `qdrant`（固定版本标签、命名卷保存 `/qdrant/storage`、不写 `ports`，api 通过 `http://qdrant:6333` 访问，`depends_on` 仅要求已启动）；`docker-compose.dev.yml` 增加 `qdrant`（仅绑 `127.0.0.1:6333`）与 `stubgateway` 服务 — verify: `docker compose up -d qdrant` 后 `docker compose port qdrant 6333` 无映射、宿主机 `nc -z localhost 6333` 失败；dev 编排下 `curl -s 127.0.0.1:6333/collections` 返回 200
 
 ## 2. 迁移与数据层
