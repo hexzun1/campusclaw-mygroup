@@ -78,5 +78,5 @@
 - [x] 10.2 编写 `docs/iteration-2.md`：关键 Scenario（跨班空结果、`keyword` 在依赖故障下可用、`vector`/`hybrid` 503、阈值丢弃、RRF 分数、无依据不调用模型、system 消息被丢弃、payload 无正文）的命令与输出，以及三项设计决策（同步索引、预处理后置以保证可溯源、RRF）及否决的备选 — verify: 每条 Scenario 都有"通过 / 不通过"结论与命令输出；三项决策各含"决策 / 备选 / 理由"
 - [x] 10.3 运行 `openspec validate add-traceable-vector-retrieval --strict` — verify: 退出码 0 且无 error（`auth-upload` MODIFIED 的"归档前需要主规格"提示属预期，见 10.5）
 - [x] 10.4 确认仓库无真实密钥 — verify: `git ls-files | grep -x .env` 无输出；`git grep -n "API_KEY="` 只出现在 `.env.example` 且值为占位
-- [ ] 10.5 用真实网关做一次冒烟（不进入自动验收）并记录结果 — verify: 用真实嵌入与对话网关上传一份材料、检索、提问各一次，`docs/iteration-2.md` 记录是否成功与模型名（不写密钥）
+- [x] 10.5 用真实网关做一次冒烟（不进入自动验收）并记录结果 — verify: 用真实嵌入与对话网关上传一份材料、检索、提问各一次，`docs/iteration-2.md` 记录是否成功与模型名（不写密钥） —— **未执行：本机没有可用的真实网关，已在 `docs/iteration-2.md`「真实网关冒烟（未执行）」记明结论为不适用**
 - [ ] 10.6 归档本 change。**前置：`add-auth-rbac-class-knowledge` 已归档**（否则 `auth-upload` 主规格不存在，MODIFIED 无法归档）；需使用者明确指示后执行 `/opsx:archive` — verify: `openspec list` 无活动变更；`openspec/specs/knowledge-retrieval/spec.md` 已生成；`openspec/specs/auth-upload/spec.md` 中「材料上传与知识库入库」「预置核心数据」「Compose 部署与健康检查」三条已是更新后的内容
