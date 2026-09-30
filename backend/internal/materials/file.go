@@ -26,7 +26,7 @@ func (h *Handlers) File(uploadDir string) http.HandlerFunc {
 		}
 		defer f.Close()
 
-		w.Header().Set("Content-Disposition", "attachment; filename=\""+m.OriginalName+"\"")
+		w.Header().Set("Content-Disposition", contentDisposition(m.OriginalName))
 		http.ServeContent(w, r, m.OriginalName, m.CreatedAt, f)
 	}
 }

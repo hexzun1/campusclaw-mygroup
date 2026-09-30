@@ -22,20 +22,16 @@ type Class struct {
 	Name string
 }
 
-type Session struct {
-	ID        string
-	UserID    int
-	ExpiresAt time.Time
-}
-
-// SessionUser is the joined view of a session with its owning user, used by
-// the session middleware to populate request context.
+// SessionUser is the identity attached to an authenticated request. It is
+// built from the verified token's claims (the `sessions` table is no longer
+// read) and is the only source of role and class for business handlers.
 type SessionUser struct {
-	SessionID string
-	UserID    int
-	Username  string
-	Role      Role
-	ClassID   int
+	UserID   int
+	Username string
+	Role     Role
+	ClassID  int
+	// ClassName is not a token claim: it stays empty unless a handler resolves
+	// it from class_id.
 	ClassName string
 }
 

@@ -1,7 +1,7 @@
-// All requests go through same-origin /api with credentials so the
-// HttpOnly session cookie is sent automatically. No session id, role or
-// token is ever read or stored here — identity always comes from the
-// server's response to /api/me.
+// All requests go through same-origin /api. The bearer token is the only
+// credential: it is kept in sessionStorage under a fixed key and attached as an
+// Authorization header. No session id, username or role is ever stored — the
+// server's /api/me response is the single source of identity.
 
 export interface Me {
   username: string
@@ -21,6 +21,27 @@ export interface MaterialDetail extends MaterialSummary {
   body: string
 }
 
+export interface LoginResponse {
+  token: string
+  username: string
+  role: 'teacher' | 'student'
+}
+
+// The only Web Storage key the app uses, and it holds nothing but the token.
+const TOKEN_KEY = 'campusclaw_token'
+
+export function getToken(): string | null {
+  return sessionStorage.getItem(TOKEN_KEY)
+}
+
+export function saveToken(token: string): void {
+  sessionStorage.setItem(TOKEN_KEY, token)
+}
+
+export function clearToken(): void {
+  sessionStorage.removeItem(TOKEN_KEY)
+}
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, message: string) {
@@ -34,10 +55,17 @@ export function setUnauthorizedHandler(fn: (() => void) | null) {
   unauthorizedHandler = fn
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, { ...options, credentials: 'include' })
+// withAuth is false only for POST /api/login. Every other request carries the
+// bearer header, and no request relies on cookies.
+async function request<T>(path: string, options: RequestInit = {}, withAuth = true): Promise<T> {
+  const headers = new Headers(options.headers)
+  const token = getToken()
+  if (withAuth && token) headers.set('Authorization', `Bearer ${token}`)
+
+  const res = await fetch(path, { ...options, headers })
 
   if (res.status === 401) {
+    clearToken()
     unauthorizedHandler?.()
     const body = await safeJson(res)
     throw new ApiError(401, body?.error ?? '未登录或会话已失效')
@@ -61,15 +89,25 @@ async function safeJson(res: Response): Promise<{ error?: string } | null> {
 }
 
 export function login(username: string, password: string) {
-  return request<{ username: string; role: string }>('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  })
+  return request<LoginResponse>(
+    '/api/login',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    },
+    false,
+  )
 }
 
-export function logout() {
-  return request<{ ok: boolean }>('/api/logout', { method: 'POST' })
+export async function logout(): Promise<{ ok: boolean }> {
+  try {
+    return await request<{ ok: boolean }>('/api/logout', { method: 'POST' })
+  } finally {
+    // The token is cleared whether or not the server could be reached: the
+    // user asked to log out.
+    clearToken()
+  }
 }
 
 export function fetchMe() {
@@ -85,10 +123,6 @@ export function getMaterial(id: number) {
   return request<MaterialDetail>(`/api/materials/${id}`)
 }
 
-export function fileDownloadUrl(id: number) {
-  return `/api/materials/${id}/file`
-}
-
 export async function uploadMaterial(file: File, title: string): Promise<{ id: number; title: string }> {
   const form = new FormData()
   form.append('file', file)
@@ -97,4 +131,56 @@ export async function uploadMaterial(file: File, title: string): Promise<{ id: n
     method: 'POST',
     body: form,
   })
+}
+
+// filenameFromDisposition reads the RFC 5987 `filename*` value first (UTF-8
+// percent-encoded, so non-ASCII names survive) and falls back to the ASCII
+// `filename=` parameter.
+export function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null
+
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header)
+  if (utf8) {
+    try {
+      return decodeURIComponent(utf8[1].trim())
+    } catch {
+      // Malformed percent-encoding: fall through to the ASCII parameter.
+    }
+  }
+
+  const plain = /filename="([^"]*)"/i.exec(header) ?? /filename=([^;]+)/i.exec(header)
+  return plain ? plain[1].trim() : null
+}
+
+// downloadMaterialFile fetches the original file with the Authorization header
+// and saves it as a Blob. A plain <a href> cannot be used: navigation does not
+// carry the bearer header, so the request would be rejected with 401.
+export async function downloadMaterialFile(id: number): Promise<void> {
+  const headers = new Headers()
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+
+  const res = await fetch(`/api/materials/${id}/file`, { headers })
+
+  if (res.status === 401) {
+    clearToken()
+    unauthorizedHandler?.()
+    throw new ApiError(401, '未登录或会话已失效')
+  }
+  if (!res.ok) {
+    const body = await safeJson(res)
+    throw new ApiError(res.status, body?.error ?? `下载失败（${res.status}）`)
+  }
+
+  const blob = await res.blob()
+  const filename = filenameFromDisposition(res.headers.get('Content-Disposition')) ?? `material-${id}`
+
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
 }

@@ -11,8 +11,8 @@ import (
 // per design.md Decision 7. Required variables cause the process to exit
 // non-zero with the missing variable names when absent.
 type Config struct {
-	SessionSecret string
-	SessionTTL    time.Duration
+	JWTSecret string
+	JWTTTL    time.Duration
 
 	DBHost     string
 	DBPort     string
@@ -26,28 +26,32 @@ type Config struct {
 	LoginMaxFailures int
 	LoginLockSeconds int
 
-	SeedTeacherAPassword   string
-	SeedStudentA1Password  string
-	SeedStudentB1Password  string
+	SeedTeacherAPassword  string
+	SeedStudentA1Password string
+	SeedStudentB1Password string
 
 	APIPort string
 	WebPort string
 }
 
 const (
-	defaultSessionTTL        = 24 * time.Hour
-	defaultDBPort            = "3306"
-	defaultMaxUploadBytes    = 2 * 1024 * 1024
-	defaultLoginMaxFailures  = 5
-	defaultLoginLockSeconds  = 300
-	defaultAPIPort           = "8081"
-	defaultWebPort           = "8080"
+	// MinJWTSecretLength is the shortest accepted JWT_SECRET. A shorter value
+	// is rejected at startup (spec: 口令与密钥安全).
+	MinJWTSecretLength = 32
+
+	defaultJWTTTL           = 24 * time.Hour
+	defaultDBPort           = "3306"
+	defaultMaxUploadBytes   = 2 * 1024 * 1024
+	defaultLoginMaxFailures = 5
+	defaultLoginLockSeconds = 300
+	defaultAPIPort          = "8081"
+	defaultWebPort          = "8080"
 )
 
 // required lists the environment variables that MUST be set. Missing any of
 // them causes Load to return an error naming every missing variable.
 var required = []string{
-	"SESSION_SECRET",
+	"JWT_SECRET",
 	"DB_HOST",
 	"DB_NAME",
 	"DB_USER",
@@ -73,8 +77,8 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		SessionSecret: os.Getenv("SESSION_SECRET"),
-		SessionTTL:    durationOrDefault("SESSION_TTL", defaultSessionTTL),
+		JWTSecret: os.Getenv("JWT_SECRET"),
+		JWTTTL:    durationOrDefault("JWT_TTL", defaultJWTTTL),
 
 		DBHost:     os.Getenv("DB_HOST"),
 		DBPort:     stringOrDefault("DB_PORT", defaultDBPort),
@@ -94,6 +98,14 @@ func Load() (*Config, error) {
 
 		APIPort: stringOrDefault("API_PORT", defaultAPIPort),
 		WebPort: stringOrDefault("WEB_PORT", defaultWebPort),
+	}
+
+	// The secret is never echoed in the error: only the variable name, the
+	// rule it violated and the observed length are reported.
+	if len(cfg.JWTSecret) < MinJWTSecretLength {
+		return nil, fmt.Errorf(
+			"JWT_SECRET is invalid: must be at least %d characters (got %d)",
+			MinJWTSecretLength, len(cfg.JWTSecret))
 	}
 
 	return cfg, nil

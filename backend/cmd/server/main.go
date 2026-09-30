@@ -27,6 +27,12 @@ func main() {
 	}
 	defer conn.Close()
 
+	// Idempotent startup DDL: existing data volumes never re-run the MySQL
+	// image's initdb.d scripts (design.md Decision 3).
+	if err := db.EnsureRevokedTokens(context.Background(), conn); err != nil {
+		log.Fatalf("ensure schema: %v", err)
+	}
+
 	if err := seed.Run(context.Background(), conn, seed.Config{
 		TeacherAPassword:  cfg.SeedTeacherAPassword,
 		StudentA1Password: cfg.SeedStudentA1Password,
@@ -37,24 +43,31 @@ func main() {
 	}
 
 	limiter := auth.NewLoginLimiter(cfg.LoginMaxFailures, cfg.LoginLockSeconds)
-	authHandlers := auth.NewHandlers(conn, cfg.SessionTTL, limiter)
-	requireSession := auth.RequireSession(conn)
+	tokenIssuer := auth.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL)
+	authHandlers := auth.NewHandlers(conn, tokenIssuer, limiter)
+	requireAuth := auth.RequireAuth(conn, tokenIssuer)
 	materialsHandlers := materials.NewHandlers(conn)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("POST /api/login", authHandlers.Login)
-	mux.Handle("POST /api/logout", requireSession(http.HandlerFunc(authHandlers.Logout)))
-	mux.Handle("GET /api/me", requireSession(http.HandlerFunc(authHandlers.Me)))
-	mux.Handle("GET /api/materials", requireSession(http.HandlerFunc(materialsHandlers.List)))
-	mux.Handle("GET /api/materials/{id}", requireSession(http.HandlerFunc(materialsHandlers.Detail)))
-	mux.Handle("GET /api/materials/{id}/file", requireSession(materialsHandlers.File(cfg.UploadDir)))
-	mux.Handle("POST /api/materials", requireSession(materialsHandlers.Upload(materials.UploadConfig{
+
+	// Every /api response — success or 401/404/503 — is non-cacheable, so a
+	// cached authenticated response can never be replayed after logout
+	// (design.md Decision 7). /health is unaffected.
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("POST /api/login", authHandlers.Login)
+	apiMux.Handle("POST /api/logout", requireAuth(http.HandlerFunc(authHandlers.Logout)))
+	apiMux.Handle("GET /api/me", requireAuth(http.HandlerFunc(authHandlers.Me)))
+	apiMux.Handle("GET /api/materials", requireAuth(http.HandlerFunc(materialsHandlers.List)))
+	apiMux.Handle("GET /api/materials/{id}", requireAuth(http.HandlerFunc(materialsHandlers.Detail)))
+	apiMux.Handle("GET /api/materials/{id}/file", requireAuth(materialsHandlers.File(cfg.UploadDir)))
+	apiMux.Handle("POST /api/materials", requireAuth(materialsHandlers.Upload(materials.UploadConfig{
 		UploadDir:      cfg.UploadDir,
 		MaxUploadBytes: cfg.MaxUploadBytes,
 	})))
+	mux.Handle("/api/", httpapi.NoStore(apiMux))
 
 	addr := ":" + cfg.APIPort
 	log.Printf("campusclaw backend listening on %s", addr)

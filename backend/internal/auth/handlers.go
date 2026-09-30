@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
-	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -16,13 +16,13 @@ import (
 )
 
 type Handlers struct {
-	Conn       *sql.DB
-	SessionTTL time.Duration
-	Limiter    *LoginLimiter
+	Conn    *sql.DB
+	Issuer  *TokenIssuer
+	Limiter *LoginLimiter
 }
 
-func NewHandlers(conn *sql.DB, sessionTTL time.Duration, limiter *LoginLimiter) *Handlers {
-	return &Handlers{Conn: conn, SessionTTL: sessionTTL, Limiter: limiter}
+func NewHandlers(conn *sql.DB, issuer *TokenIssuer, limiter *LoginLimiter) *Handlers {
+	return &Handlers{Conn: conn, Issuer: issuer, Limiter: limiter}
 }
 
 // dummyHash is compared against when a username does not exist, so lookup
@@ -86,35 +86,49 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 
 	h.Limiter.Reset(key)
 
-	// Issue a brand-new session and invalidate any session the caller
-	// already had, so an old session ID can never resurrect (design.md
-	// Decision 2: prevents session fixation).
-	if err := db.DeleteSessionsForUser(r.Context(), h.Conn, user.ID); err != nil {
-		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
-		return
-	}
-	sessionID, err := db.NewSessionID()
+	// A successful login signs a self-contained token: no server-side session
+	// record is written and no cookie is set. Existing tokens of the same user
+	// stay valid until they expire or are revoked by logout (design.md
+	// Decision 6).
+	token, err := h.Issuer.Issue(user.ID, user.Username, string(user.Role), user.ClassID)
 	if err != nil {
 		httpapi.WriteError(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	if err := db.CreateSession(r.Context(), h.Conn, sessionID, user.ID, h.SessionTTL); err != nil {
-		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
-		return
-	}
 
-	SetSessionCookie(w, sessionID, h.SessionTTL)
 	httpapi.WriteJSON(w, http.StatusOK, map[string]string{
+		"token":    token,
 		"username": user.Username,
 		"role":     string(user.Role),
 	})
 }
 
+// Logout revokes exactly the token that authenticated the request. Other
+// tokens of the same user are untouched (design.md Decision 3). The request
+// already passed RequireAuth, so an invalid or already revoked token never
+// reaches this handler.
 func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
-	if sessionID, ok := ReadSessionCookie(r); ok {
-		_ = db.DeleteSession(context.WithoutCancel(r.Context()), h.Conn, sessionID)
+	su := httpapi.SessionUserFromContext(r.Context())
+	meta := httpapi.TokenMetaFromContext(r.Context())
+	if su == nil || meta == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, httpapi.MsgUnauthorized)
+		return
 	}
-	ClearSessionCookie(w)
+
+	// The revocation must still land if the client disconnects mid-request.
+	ctx := context.WithoutCancel(r.Context())
+	if err := db.RevokeToken(ctx, h.Conn, meta.JTI, su.UserID, meta.ExpiresAt); err != nil {
+		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
+		return
+	}
+
+	// Opportunistic cleanup: revocation rows are only meaningful until their
+	// token expires. A failure here MUST NOT fail the logout itself, since the
+	// token is already revoked.
+	if err := db.PurgeExpiredRevocations(ctx, h.Conn); err != nil {
+		log.Printf("purge expired revocations: %v", err)
+	}
+
 	httpapi.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -124,10 +138,19 @@ func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, http.StatusUnauthorized, httpapi.MsgUnauthorized)
 		return
 	}
+
+	// The token carries the identity but not the class name, so this is the one
+	// field resolved from the database (design.md Decision 2).
+	class, err := db.GetClassByID(r.Context(), h.Conn, su.ClassID)
+	if err != nil {
+		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
+		return
+	}
+
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
 		"username":   su.Username,
 		"role":       su.Role,
 		"class_id":   su.ClassID,
-		"class_name": su.ClassName,
+		"class_name": class.Name,
 	})
 }

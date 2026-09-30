@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   ApiError,
-  fileDownloadUrl,
+  downloadMaterialFile,
   getMaterial,
   listMaterials,
   uploadMaterial,
@@ -44,6 +44,16 @@ export default function MaterialsPage() {
       setSelected(detail)
     } catch (err) {
       if (err instanceof ApiError) setLoadError(err.message)
+    }
+  }
+
+  // Downloads must carry the Authorization header, so they go through fetch +
+  // Blob instead of a plain link.
+  async function handleDownload(id: number) {
+    try {
+      await downloadMaterialFile(id)
+    } catch (err) {
+      if (err instanceof ApiError && err.status !== 401) setLoadError(err.message)
     }
   }
 
@@ -122,7 +132,9 @@ export default function MaterialsPage() {
           <div className="material-detail-header">
             <h2>{selected.title}</h2>
             <div>
-              <a href={fileDownloadUrl(selected.id)}>下载原文件</a>
+              <button type="button" onClick={() => handleDownload(selected.id)}>
+                下载原文件
+              </button>
               <button type="button" onClick={() => setSelected(null)}>
                 关闭
               </button>

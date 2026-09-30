@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { login } from '../api/client'
+import { login, saveToken } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 
 export default function LoginPage() {
@@ -16,7 +16,9 @@ export default function LoginPage() {
     setSubmitting(true)
     setError(null)
     try {
-      await login(username, password)
+      // The token from the login response is the only credential the app keeps.
+      const res = await login(username, password)
+      saveToken(res.token)
       await refresh()
       navigate('/materials', { replace: true })
     } catch {

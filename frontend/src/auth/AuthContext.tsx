@@ -1,5 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
-import { fetchMe, logout as apiLogout, setUnauthorizedHandler, type Me } from '../api/client'
+import {
+  clearToken,
+  fetchMe,
+  getToken,
+  logout as apiLogout,
+  setUnauthorizedHandler,
+  type Me,
+} from '../api/client'
 
 interface AuthState {
   user: Me | null
@@ -10,18 +17,25 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | null>(null)
 
-// Identity always comes from the server. This provider never reads or
-// writes localStorage/sessionStorage for the session id, role or token —
-// only /api/me decides who is logged in.
+// Identity always comes from the server. The only thing this provider stores is
+// the bearer token, kept in sessionStorage by the api client; role, class and
+// username are never persisted and are taken from /api/me.
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<Me | null>(null)
   const [loading, setLoading] = useState(true)
 
   const refresh = useCallback(async () => {
+    // Without a token there is nothing to confirm: go straight to the login
+    // page instead of firing a request that must fail.
+    if (!getToken()) {
+      setUser(null)
+      setLoading(false)
+      return
+    }
     try {
-      const me = await fetchMe()
-      setUser(me)
+      setUser(await fetchMe())
     } catch {
+      clearToken()
       setUser(null)
     } finally {
       setLoading(false)
@@ -29,6 +43,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
+    // Any 401 from any call — the client has already dropped the token by then.
     setUnauthorizedHandler(() => setUser(null))
     refresh()
     return () => setUnauthorizedHandler(null)
