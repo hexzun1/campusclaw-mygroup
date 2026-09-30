@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"campusclaw/backend/internal/db"
+	"campusclaw/backend/internal/vector"
 )
 
 const (
@@ -105,14 +106,29 @@ func ParseRequest(body []byte) (Request, error) {
 	return Request{Query: query, Mode: mode, TopK: topK}, nil
 }
 
+// Embedder is the slice of the embedding gateway the vector branch needs.
+type Embedder interface {
+	EmbedOne(ctx context.Context, text string) ([]float64, error)
+}
+
+// VectorStore is the slice of the vector store the vector branch needs.
+type VectorStore interface {
+	Search(ctx context.Context, classID int, vector []float64, limit int) ([]vector.ScoredPoint, error)
+}
+
 // Engine resolves queries for one class. It is the shared core of the search
 // endpoint and of the ask pipeline.
 type Engine struct {
-	conn *sql.DB
+	conn     *sql.DB
+	embedder Embedder
+	vectors  VectorStore
 }
 
-// New builds an engine over the given database.
-func New(conn *sql.DB) *Engine { return &Engine{conn: conn} }
+// New builds an engine. The embedder and the vector store are only used by the
+// vector and hybrid modes.
+func New(conn *sql.DB, embedder Embedder, vectors VectorStore) *Engine {
+	return &Engine{conn: conn, embedder: embedder, vectors: vectors}
+}
 
 // Search runs one validated query and returns the traceable hits of classID, at
 // most req.TopK of them.
@@ -120,22 +136,90 @@ func (e *Engine) Search(ctx context.Context, classID int, req Request) ([]Hit, e
 	switch req.Mode {
 	case ModeKeyword:
 		return e.keyword(ctx, classID, req)
+	case ModeVector:
+		return e.vector(ctx, classID, req)
 	}
-	// The vector and hybrid modes take their candidates from the embedding
-	// gateway and the vector store; a request that cannot resolve any yields
-	// no hits rather than an error.
+	// The hybrid mode fuses the two branches by rank; a request that cannot
+	// resolve any yields no hits rather than an error.
 	return []Hit{}, nil
 }
 
-// keyword resolves the MySQL full-text branch. It never calls the embedding
-// gateway or the vector store, so it stays available when either is down
-// (spec: 关键词检索).
+// keyword resolves the keyword mode: the MySQL full-text branch, capped at the
+// requested result count. It never calls the embedding gateway or the vector
+// store, so it stays available when either is down (spec: 关键词检索).
 func (e *Engine) keyword(ctx context.Context, classID int, req Request) ([]Hit, error) {
-	found, err := db.SearchChunksByKeyword(ctx, e.conn, classID, req.Query, db.KeywordLimit)
+	found, err := e.keywordCandidates(ctx, classID, req.Query)
 	if err != nil {
 		return nil, err
 	}
 	return toHits(found, req.TopK), nil
+}
+
+// keywordCandidates returns the ranked keyword branch of one query, best match
+// first. The class filter is part of the query itself.
+func (e *Engine) keywordCandidates(ctx context.Context, classID int, query string) ([]db.ChunkHit, error) {
+	return db.SearchChunksByKeyword(ctx, e.conn, classID, query, db.KeywordLimit)
+}
+
+// vector resolves the vector mode: the closest chunks of the class, capped at
+// the requested result count.
+func (e *Engine) vector(ctx context.Context, classID int, req Request) ([]Hit, error) {
+	found, err := e.vectorCandidates(ctx, classID, req.Query)
+	if err != nil {
+		return nil, err
+	}
+	return toHits(found, req.TopK), nil
+}
+
+// vectorCandidates returns the ranked vector branch of one query, closest
+// first.
+//
+// Three layers keep the branch inside the class: the vector store filters on
+// the payload's class_id and drops weak matches below its score threshold, and
+// the hits are then read back from MySQL with the class filter applied a second
+// time. A point whose chunk no longer exists — or no longer belongs to the
+// class — is dropped rather than returned: the vector store is an index, not
+// the source of truth (spec: 向量检索).
+func (e *Engine) vectorCandidates(ctx context.Context, classID int, query string) ([]db.ChunkHit, error) {
+	queryVector, err := e.embedder.EmbedOne(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	points, err := e.vectors.Search(ctx, classID, queryVector, vector.SearchLimit)
+	if err != nil {
+		return nil, err
+	}
+	if len(points) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]int64, 0, len(points))
+	for _, p := range points {
+		ids = append(ids, p.ID)
+	}
+
+	rows, err := db.GetChunksByIDs(ctx, e.conn, classID, ids)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]db.ChunkHit, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+
+	// The vector store's order is the ranking, so the rows are re-read in that
+	// order and the scores come from the vector store.
+	found := make([]db.ChunkHit, 0, len(points))
+	for _, p := range points {
+		row, ok := byID[p.ID]
+		if !ok {
+			continue
+		}
+		row.Score = p.Score
+		found = append(found, row)
+	}
+	return found, nil
 }
 
 // Hit is one traceable search result: the material it came from, the chunk and

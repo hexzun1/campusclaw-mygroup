@@ -83,7 +83,7 @@ func main() {
 	requireAuth := auth.RequireAuth(conn, tokenIssuer)
 
 	materialsHandlers := materials.NewHandlers(conn, indexer, vectorClient)
-	searchHandlers := search.NewHandlers(search.New(conn))
+	searchHandlers := search.NewHandlers(search.New(conn, embeddingClient, vectorClient))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
