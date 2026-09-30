@@ -72,7 +72,7 @@ func main() {
 	vectorClient := vector.NewClient(cfg.QdrantURL, cfg.QdrantAPIKey, cfg.EmbeddingDim, cfg.GatewayTimeout)
 	indexer := index.New(index.SQLChunkStore{Conn: conn}, embeddingClient, vectorClient, cfg.EmbeddingBatchSize, cfg.IndexTimeout)
 
-	materialsHandlers := materials.NewHandlers(conn, indexer)
+	materialsHandlers := materials.NewHandlers(conn, indexer, vectorClient)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +93,7 @@ func main() {
 		UploadDir:      cfg.UploadDir,
 		MaxUploadBytes: cfg.MaxUploadBytes,
 	})))
+	apiMux.Handle("POST /api/materials/{id}/reindex", requireAuth(http.HandlerFunc(materialsHandlers.Reindex)))
 	mux.Handle("/api/", httpapi.NoStore(apiMux))
 
 	addr := ":" + cfg.APIPort

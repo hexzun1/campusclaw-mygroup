@@ -128,16 +128,7 @@ func (h *Handlers) Upload(cfg UploadConfig) http.HandlerFunc {
 		}
 
 		body := string(content)
-		produced := knowledge.ChunkBody(body, params)
-		chunks := make([]db.Chunk, 0, len(produced))
-		for _, c := range produced {
-			chunks = append(chunks, db.Chunk{
-				ChunkIndex: c.Index,
-				CharStart:  c.Span.Start,
-				CharEnd:    c.Span.End,
-				ChunkText:  c.Text,
-			})
-		}
+		chunks := toDBChunks(knowledge.ChunkBody(body, params))
 
 		materialID, err := db.InsertMaterialWithChunks(r.Context(), h.Conn, db.NewMaterial{
 			ClassID:       su.ClassID,
@@ -176,6 +167,22 @@ func (h *Handlers) Upload(cfg UploadConfig) http.HandlerFunc {
 			"index_status": status,
 		})
 	}
+}
+
+// toDBChunks turns chunker output into storage rows. The identifiers and status
+// are assigned by the database layer, so a caller cannot place a chunk in
+// another class.
+func toDBChunks(produced []knowledge.Chunk) []db.Chunk {
+	chunks := make([]db.Chunk, 0, len(produced))
+	for _, c := range produced {
+		chunks = append(chunks, db.Chunk{
+			ChunkIndex: c.Index,
+			CharStart:  c.Span.Start,
+			CharEnd:    c.Span.End,
+			ChunkText:  c.Text,
+		})
+	}
+	return chunks
 }
 
 // chunkParamsFromForm reads only the chunking parameters the client actually

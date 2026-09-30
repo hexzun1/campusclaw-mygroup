@@ -1,8 +1,10 @@
 package knowledge
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Strategy selects how a body text is cut into chunks (spec: 切分策略).
@@ -156,6 +158,57 @@ func optionalInt(raw map[string]string, name string, minValue, maxValue int) (va
 		return 0, true, fmt.Errorf("%s must be an integer between %d and %d", name, minValue, maxValue)
 	}
 	return n, true, nil
+}
+
+// ParseParamsJSON validates the same parameter set as ParseParams, but reads it
+// from a JSON object — the shape a reindex request uses. Values may be strings,
+// numbers or booleans; they are rendered to their textual form first so both
+// input shapes share one set of rules and one set of error messages. Only the
+// known parameter names are considered, exactly as for a multipart form.
+func ParseParamsJSON(raw []byte) (ChunkParams, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return ParseParams(nil)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return ChunkParams{}, fmt.Errorf("body must be a JSON object: %w", err)
+	}
+
+	asStrings := map[string]string{}
+	for name, value := range decoded {
+		if !knownParamNames[name] {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			asStrings[name] = typed
+		case bool:
+			asStrings[name] = strconv.FormatBool(typed)
+		case float64:
+			// JSON numbers arrive as float64; render integers without a decimal
+			// point so strconv.Atoi keeps accepting them.
+			if typed == float64(int64(typed)) {
+				asStrings[name] = strconv.FormatInt(int64(typed), 10)
+			} else {
+				asStrings[name] = strconv.FormatFloat(typed, 'f', -1, 64)
+			}
+		default:
+			return ChunkParams{}, fmt.Errorf("%s must be a string, number or boolean", name)
+		}
+	}
+	return ParseParams(asStrings)
+}
+
+// knownParamNames is the vocabulary of chunking parameters, shared by the
+// multipart form and the JSON body.
+var knownParamNames = map[string]bool{
+	ParamStrategy:           true,
+	ParamChunkSize:          true,
+	ParamOverlapPercent:     true,
+	ParamRemoveURL:          true,
+	ParamRemoveEmail:        true,
+	ParamCollapseWhitespace: true,
 }
 
 // optionalBool accepts exactly "true" and "false"; anything else — including an

@@ -278,26 +278,27 @@ func ReplaceChunksForMaterial(ctx context.Context, conn *sql.DB, materialID, cla
 		return fmt.Errorf("delete old chunks: %w", err)
 	}
 
-	res, err := tx.ExecContext(ctx,
-		`UPDATE knowledge_entries SET chunk_strategy = ?, chunk_params = ? WHERE material_id = ? AND class_id = ?`,
-		strategy, params, materialID, classID)
-	if err != nil {
-		return fmt.Errorf("update chunk strategy: %w", err)
-	}
-	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
-		// Distinguish "material not in this class" from "nothing to update".
-		var exists int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM knowledge_entries WHERE material_id = ? AND class_id = ?`,
-			materialID, classID).Scan(&exists); err != nil {
-			return fmt.Errorf("check knowledge entry: %w", err)
-		}
-		if exists == 0 {
+	// Resolve the knowledge entry the new chunks belong to. The lookup doubles
+	// as the "material is not in this class" check, which must be indistinguishable
+	// from "material does not exist".
+	var entryID int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM knowledge_entries WHERE material_id = ? AND class_id = ?`,
+		materialID, classID).Scan(&entryID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
+		return fmt.Errorf("look up knowledge entry: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE knowledge_entries SET chunk_strategy = ?, chunk_params = ? WHERE id = ?`,
+		strategy, params, entryID); err != nil {
+		return fmt.Errorf("update chunk strategy: %w", err)
 	}
 
 	for i := range chunks {
+		chunks[i].KnowledgeEntryID = entryID
 		chunks[i].MaterialID = materialID
 		chunks[i].ClassID = classID
 		chunks[i].IndexStatus = IndexPending

@@ -19,12 +19,15 @@ import (
 type Handlers struct {
 	Conn *sql.DB
 	// Indexer runs the vector pipeline after a material is committed. It is the
-	// only place that talks to the embedding gateway and the vector store.
+	// only place that embeds text and writes vectors during upload.
 	Indexer *index.Indexer
+	// Vectors is used by the reindex flow, which deletes a material's vectors
+	// before swapping its chunks.
+	Vectors VectorStore
 }
 
-func NewHandlers(conn *sql.DB, indexer *index.Indexer) *Handlers {
-	return &Handlers{Conn: conn, Indexer: indexer}
+func NewHandlers(conn *sql.DB, indexer *index.Indexer, vectors VectorStore) *Handlers {
+	return &Handlers{Conn: conn, Indexer: indexer, Vectors: vectors}
 }
 
 // List returns materials for the caller's own class only. Any class_id in
@@ -81,8 +84,9 @@ func (h *Handlers) loadOwnClassMaterial(w http.ResponseWriter, r *http.Request) 
 	return m
 }
 
-// Detail returns title, class, upload time and knowledge body. It MUST NOT
-// expose stored_name or any filesystem path.
+// Detail returns title, class, upload time and knowledge body, together with
+// the aggregate index state of the material's chunks. It MUST NOT expose
+// stored_name, any filesystem path, a vector or the vector store's address.
 func (h *Handlers) Detail(w http.ResponseWriter, r *http.Request) {
 	m := h.loadOwnClassMaterial(w, r)
 	if m == nil {
@@ -99,11 +103,28 @@ func (h *Handlers) Detail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The aggregate is what the caller needs to know: any failed chunk makes the
+	// material failed, otherwise any pending chunk makes it pending (spec: 索引
+	// 状态与重建). loadOwnClassMaterial already proved the material belongs to the
+	// caller's class, so its class_id is safe to filter by.
+	stats, err := db.GetChunkStats(r.Context(), h.Conn, m.ID, m.ClassID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			httpapi.WriteError(w, http.StatusNotFound, httpapi.MsgNotFound)
+			return
+		}
+		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
+		return
+	}
+
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
-		"id":         m.ID,
-		"title":      m.Title,
-		"class_id":   m.ClassID,
-		"created_at": m.CreatedAt,
-		"body":       entry.BodyText,
+		"id":             m.ID,
+		"title":          m.Title,
+		"class_id":       m.ClassID,
+		"created_at":     m.CreatedAt,
+		"body":           entry.BodyText,
+		"index_status":   stats.Status,
+		"chunk_count":    stats.Count,
+		"chunk_strategy": stats.Strategy,
 	})
 }
