@@ -1,5 +1,7 @@
 # 迭代 1 说明（v0.1.0-auth-upload）
 
+> **本文的登录会话方案已被 `switch-to-jwt-bearer-auth` 取代**：Cookie 相关命令（`curl -c/-b`）、`SESSION_SECRET`/`SESSION_TTL` 以及 design 里「否决 JWT、禁止 Web Storage」的决策 2 仅作历史记录，现状见 `docs/jwt-bearer-auth.md`。本文其余内容（班级隔离、403/404 约定、上传入库等）仍然有效。
+
 规约：`openspec/changes/add-auth-rbac-class-knowledge/`
 
 ## 关键 Scenario 验收
