@@ -16,3 +16,7 @@ backend/*.exe
 # 系统与编辑器
 .DS_Store
 *.log
+
+# 本地工具目录
+.agents/
+.qoder/
