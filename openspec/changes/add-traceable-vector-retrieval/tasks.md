@@ -54,7 +54,7 @@
 - [x] 7.4 实现 RRF 融合与 `hybrid`（两路各取前 50，名次从 1 起，`1/(60+rank)` 求和，降序、同分按切片 ID 升序，一路为空取另一路） — verify: `go test` 断言名次 (1,2) 的切片得 `1/61+1/62`、仅一路出现名次 2 的得 `1/62` 且前者在前；同分按 ID 升序；一路为空时等于另一路；集成：不带 `mode` 与 `mode=hybrid` 结果相同
 - [x] 7.5 命中结果的溯源字段 — verify: 每条命中含 `material_id`、材料标题、`chunk_id`、`chunk_index`、`char_start`、`char_end`、摘录（`chunk_text` 前 300 字，超出加 `…`）；脚本对未预处理材料校验：摘录是详情 `body` 中 `[char_start, char_end)` 字符的前缀；`hits` 中无任何向量或路径字段
 - [x] 7.6 依赖不可用的降级 — verify: `docker compose stop qdrant` 后 `vector`、`hybrid` 得 503，`keyword` 得 200，之后 `GET /api/me` 仍得 200；打开桩的嵌入失败开关后同样如此；503 响应体 `grep` 不出现 `qdrant`、`6333`、`api-key`、桩地址
-- [ ] 7.7 权限与班级范围 — verify: 不带 Cookie 调用得 401 且响应体无标题 / 摘录；student_a1 在 query、Header、请求体里附带 B 班 ID 的结果与不带时 `diff` 无输出；student_a1 与 student_b1 对同一查询词的结果互不含对方班级的切片；teacher_a 同样只见 A 班
+- [x] 7.7 权限与班级范围 — verify: 不带 Cookie 调用得 401 且响应体无标题 / 摘录；student_a1 在 query、Header、请求体里附带 B 班 ID 的结果与不带时 `diff` 无输出；student_a1 与 student_b1 对同一查询词的结果互不含对方班级的切片；teacher_a 同样只见 A 班
 
 ## 8. 问答
 
