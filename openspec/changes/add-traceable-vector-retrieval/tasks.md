@@ -70,7 +70,7 @@
 - [x] 9.2 生产编排只暴露 web — verify: `docker compose up --build -d` 后 `docker compose port qdrant 6333` 与 `6334`、`docker compose port api 8081` 均无输出；`lsof -iTCP -sTCP:LISTEN -P | grep -E ':(3306|6333|6334|8081)\b'` 无输出；`http://localhost:8080/health` 仍返回 `{"status":"ok"}`
 - [x] 9.3 重建后数据仍在 — verify: 上传并索引一份材料后 `docker compose down && docker compose up -d`（不带 `-v`），该材料 `vector` 检索仍命中、`index_status` 仍为 `indexed`
 - [x] 9.4 嵌入维度变更的行为 — verify: 把 `EMBEDDING_DIM` 改为另一个值重启 api：`vector`/`hybrid` 得 503、`keyword` 得 200，日志明确指出维度不符（不含密钥）；改回后恢复
-- [ ] 9.5 密钥不外泄 — verify: `.env` 里的网关密钥值 `grep -r` 检索 `frontend/dist`、检索 / 问答 / 详情的响应样本均无输出；`git grep -n "API_KEY="` 只出现在 `.env.example` 且值为占位
+- [x] 9.5 密钥不外泄 — verify: `.env` 里的网关密钥值 `grep -r` 检索 `frontend/dist`、检索 / 问答 / 详情的响应样本均无输出；`git grep -n "API_KEY="` 只出现在 `.env.example` 且值为占位
 
 ## 10. 文档与发布
 
