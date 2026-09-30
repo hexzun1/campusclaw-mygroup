@@ -9,8 +9,11 @@ import (
 	"campusclaw/backend/internal/auth"
 	"campusclaw/backend/internal/config"
 	"campusclaw/backend/internal/db"
+	"campusclaw/backend/internal/gateway"
 	"campusclaw/backend/internal/httpapi"
+	"campusclaw/backend/internal/index"
 	"campusclaw/backend/internal/materials"
+	"campusclaw/backend/internal/vector"
 	"campusclaw/backend/migrations"
 	"campusclaw/backend/seed"
 )
@@ -54,7 +57,22 @@ func main() {
 	tokenIssuer := auth.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL)
 	authHandlers := auth.NewHandlers(conn, tokenIssuer, limiter)
 	requireAuth := auth.RequireAuth(conn, tokenIssuer)
-	materialsHandlers := materials.NewHandlers(conn)
+
+	// External services are constructed but not contacted here: the vector
+	// collection is ensured on first use, so the api starts even when Qdrant or
+	// a gateway is down (design.md Decision 3).
+	embeddingClient := gateway.NewEmbeddingClient(gateway.EmbeddingConfig{
+		BaseURL: cfg.EmbeddingBaseURL,
+		APIKey:  cfg.EmbeddingAPIKey,
+		Model:   cfg.EmbeddingModel,
+		Dim:     cfg.EmbeddingDim,
+		Batch:   cfg.EmbeddingBatchSize,
+		Timeout: cfg.GatewayTimeout,
+	})
+	vectorClient := vector.NewClient(cfg.QdrantURL, cfg.QdrantAPIKey, cfg.EmbeddingDim, cfg.GatewayTimeout)
+	indexer := index.New(index.SQLChunkStore{Conn: conn}, embeddingClient, vectorClient, cfg.EmbeddingBatchSize, cfg.IndexTimeout)
+
+	materialsHandlers := materials.NewHandlers(conn, indexer)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {

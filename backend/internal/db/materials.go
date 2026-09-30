@@ -110,3 +110,97 @@ func InsertMaterialWithKnowledge(ctx context.Context, conn *sql.DB, classID int,
 	}
 	return materialID, nil
 }
+
+// NewMaterial is everything one upload writes in a single transaction.
+type NewMaterial struct {
+	ClassID      int
+	Title        string
+	StoredName   string
+	OriginalName string
+	SizeBytes    int64
+	UploadedBy   int
+	BodyText     string
+
+	// ChunkStrategy and ChunkParams describe how Chunks were produced. They are
+	// stored on the knowledge entry so the detail view can show the strategy and
+	// a later reindex can default to the same one.
+	ChunkStrategy string
+	ChunkParams   []byte
+
+	// Chunks are the slices of BodyText. Their identifiers and status are
+	// assigned here, so a caller cannot place a chunk in another class.
+	Chunks []Chunk
+}
+
+// InsertMaterialWithChunks writes materials, knowledge_entries (with its
+// chunking metadata) and knowledge_chunks in one transaction, so a failure
+// leaves neither a material nor a half-chunked entry behind
+// (spec: 材料上传与知识库入库).
+//
+// The chunks are inserted as pending: the vector write happens after the
+// commit, and its failure must not roll the material back.
+func InsertMaterialWithChunks(ctx context.Context, conn *sql.DB, in NewMaterial) (materialID int, err error) {
+	if in.ChunkStrategy == "" {
+		in.ChunkStrategy = "auto"
+	}
+
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	res, err := tx.ExecContext(ctx, `INSERT INTO materials (class_id, title, stored_name, original_name, size_bytes, uploaded_by)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		in.ClassID, in.Title, in.StoredName, in.OriginalName, in.SizeBytes, in.UploadedBy)
+	if err != nil {
+		return 0, fmt.Errorf("insert material: %w", err)
+	}
+	id64, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("material last insert id: %w", err)
+	}
+	materialID = int(id64)
+
+	res, err = tx.ExecContext(ctx, `INSERT INTO knowledge_entries (material_id, class_id, body_text, chunk_strategy, chunk_params)
+		VALUES (?, ?, ?, ?, ?)`,
+		materialID, in.ClassID, in.BodyText, in.ChunkStrategy, nullableJSON(in.ChunkParams))
+	if err != nil {
+		return 0, fmt.Errorf("insert knowledge entry: %w", err)
+	}
+	entryID64, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("knowledge entry last insert id: %w", err)
+	}
+	entryID := int(entryID64)
+
+	chunks := make([]Chunk, len(in.Chunks))
+	copy(chunks, in.Chunks)
+	for i := range chunks {
+		chunks[i].KnowledgeEntryID = entryID
+		chunks[i].MaterialID = materialID
+		chunks[i].ClassID = in.ClassID
+		chunks[i].IndexStatus = IndexPending
+	}
+	if err = insertChunks(ctx, tx, chunks); err != nil {
+		return 0, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit tx: %w", err)
+	}
+	return materialID, nil
+}
+
+// nullableJSON stores an empty parameter blob as SQL NULL rather than an empty
+// string, so the column always either holds a JSON object or nothing.
+func nullableJSON(params []byte) any {
+	if len(params) == 0 {
+		return nil
+	}
+	return params
+}

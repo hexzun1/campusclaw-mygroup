@@ -13,14 +13,18 @@ import (
 
 	"campusclaw/backend/internal/db"
 	"campusclaw/backend/internal/httpapi"
+	"campusclaw/backend/internal/index"
 )
 
 type Handlers struct {
 	Conn *sql.DB
+	// Indexer runs the vector pipeline after a material is committed. It is the
+	// only place that talks to the embedding gateway and the vector store.
+	Indexer *index.Indexer
 }
 
-func NewHandlers(conn *sql.DB) *Handlers {
-	return &Handlers{Conn: conn}
+func NewHandlers(conn *sql.DB, indexer *index.Indexer) *Handlers {
+	return &Handlers{Conn: conn, Indexer: indexer}
 }
 
 // List returns materials for the caller's own class only. Any class_id in

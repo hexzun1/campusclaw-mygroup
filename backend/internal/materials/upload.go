@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 
 	"campusclaw/backend/internal/db"
 	"campusclaw/backend/internal/httpapi"
+	"campusclaw/backend/internal/knowledge"
 )
 
 var allowedExtensions = map[string]bool{
@@ -24,6 +27,18 @@ var allowedExtensions = map[string]bool{
 type UploadConfig struct {
 	UploadDir      string
 	MaxUploadBytes int64
+}
+
+// uploadParamNames are the chunking parameters an upload may carry. They are
+// collected from the multipart form before anything is written, so an invalid
+// value cannot leave a file or a row behind (spec: 切分参数不合法).
+var uploadParamNames = []string{
+	knowledge.ParamStrategy,
+	knowledge.ParamChunkSize,
+	knowledge.ParamOverlapPercent,
+	knowledge.ParamRemoveURL,
+	knowledge.ParamRemoveEmail,
+	knowledge.ParamCollapseWhitespace,
 }
 
 func (h *Handlers) Upload(cfg UploadConfig) http.HandlerFunc {
@@ -80,6 +95,15 @@ func (h *Handlers) Upload(cfg UploadConfig) http.HandlerFunc {
 			return
 		}
 
+		// Chunking parameters are validated before the file is written, so a bad
+		// strategy or an out-of-range size leaves the disk and the tables
+		// untouched.
+		params, err := chunkParamsFromForm(r.MultipartForm)
+		if err != nil {
+			httpapi.WriteError(w, http.StatusBadRequest, "切分参数不合法："+err.Error())
+			return
+		}
+
 		title := r.FormValue("title")
 		if title == "" {
 			base := filepath.Base(header.Filename)
@@ -103,18 +127,70 @@ func (h *Handlers) Upload(cfg UploadConfig) http.HandlerFunc {
 			return
 		}
 
-		materialID, err := db.InsertMaterialWithKnowledge(r.Context(), h.Conn, su.ClassID, title, storedName, header.Filename, int64(len(content)), su.UserID, string(content))
+		body := string(content)
+		produced := knowledge.ChunkBody(body, params)
+		chunks := make([]db.Chunk, 0, len(produced))
+		for _, c := range produced {
+			chunks = append(chunks, db.Chunk{
+				ChunkIndex: c.Index,
+				CharStart:  c.Span.Start,
+				CharEnd:    c.Span.End,
+				ChunkText:  c.Text,
+			})
+		}
+
+		materialID, err := db.InsertMaterialWithChunks(r.Context(), h.Conn, db.NewMaterial{
+			ClassID:       su.ClassID,
+			Title:         title,
+			StoredName:    storedName,
+			OriginalName:  header.Filename,
+			SizeBytes:     int64(len(content)),
+			UploadedBy:    su.UserID,
+			BodyText:      body,
+			ChunkStrategy: string(params.Strategy),
+			ChunkParams:   params.ParamsJSON(),
+			Chunks:        chunks,
+		})
 		if err != nil {
 			_ = os.Remove(fullPath)
 			httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
 			return
 		}
 
+		// Indexing runs after the commit. Its failure never rolls the material
+		// back; it only leaves the affected chunks marked as failed, which a
+		// reindex can repair (design.md Decision 6).
+		status := db.IndexPending
+		if h.Indexer != nil {
+			if err := h.Indexer.IndexMaterial(r.Context(), materialID, su.ClassID); err != nil {
+				log.Printf("upload: index material %d: %v", materialID, err)
+			}
+		}
+		if stats, err := db.GetChunkStats(r.Context(), h.Conn, materialID, su.ClassID); err == nil {
+			status = stats.Status
+		}
+
 		httpapi.WriteJSON(w, http.StatusCreated, map[string]any{
-			"id":    materialID,
-			"title": title,
+			"id":           materialID,
+			"title":        title,
+			"index_status": status,
 		})
 	}
+}
+
+// chunkParamsFromForm reads only the chunking parameters the client actually
+// sent: a missing key keeps its default, while a present but empty value is
+// invalid rather than silently ignored.
+func chunkParamsFromForm(form *multipart.Form) (knowledge.ChunkParams, error) {
+	raw := map[string]string{}
+	if form != nil {
+		for _, name := range uploadParamNames {
+			if values, ok := form.Value[name]; ok && len(values) > 0 {
+				raw[name] = values[0]
+			}
+		}
+	}
+	return knowledge.ParseParams(raw)
 }
 
 func randomFilename(ext string) (string, error) {
