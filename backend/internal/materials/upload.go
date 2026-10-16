@@ -41,6 +41,27 @@ var uploadParamNames = []string{
 	knowledge.ParamCollapseWhitespace,
 }
 
+// @Summary 上传材料
+// @Description 仅教师可用。上传 .txt / .md（UTF-8），同步完成入库与向量索引；索引失败不回滚材料，切片标记 failed，可用重建恢复。切分参数不合法时不留下任何文件或记录。
+// @Tags 材料
+// @Accept multipart/form-data
+// @Produce json
+// @Param file formData file true "文件（.txt 或 .md，UTF-8，不超过上传上限）"
+// @Param title formData string false "标题（缺省为文件名去掉扩展名）"
+// @Param strategy formData string false "切分策略：auto（缺省）/ custom / hierarchy"
+// @Param chunk_size formData int false "custom 的窗口大小（100–2000）"
+// @Param overlap_percent formData int false "custom 的重叠百分比（0–50）"
+// @Param remove_url formData boolean false "预处理：移除链接（true/false）"
+// @Param remove_email formData boolean false "预处理：移除邮箱（true/false）"
+// @Param collapse_whitespace formData boolean false "预处理：合并空白（true/false）"
+// @Success 201 {object} map[string]interface{} "id、title、index_status"
+// @Failure 400 {object} httpapi.errorBody "文件类型、编码、大小或切分参数不合法"
+// @Failure 401 {object} httpapi.errorBody "未登录或会话已失效"
+// @Failure 403 {object} httpapi.errorBody "学生无权上传"
+// @Failure 413 {object} httpapi.errorBody "文件超过大小上限"
+// @Failure 503 {object} httpapi.errorBody "服务暂不可用"
+// @Security BearerAuth
+// @Router /api/materials [post]
 func (h *Handlers) Upload(cfg UploadConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		su := httpapi.SessionUserFromContext(r.Context())

@@ -43,4 +43,4 @@
 - [x] 7.2 新增 `docs/knowledge-qa-ui.md`，逐条记录本 change 每个 Requirement 的场景验收结果（通过 / 不通过与依据），并在 `docs/iteration-2.md` 顶部加一句"「不做前端检索页」这一非目标已被 add-knowledge-qa-ui 取代"，其余内容不改 — verify: 文档覆盖 spec 的 6 条 Requirement，每条有结论与依据；`docs/iteration-2.md` 首屏可见该说明
 - [x] 7.3 运行 `openspec validate add-knowledge-qa-ui --strict` — verify: 退出码 0 且无 error
 - [x] 7.4 确认没有误改后端、没有泄露凭据 — verify: `git diff --stat -- backend docker-compose.yml docker-compose.dev.yml` 无输出；`git ls-files | grep -x .env` 无输出；`git grep -n "Bearer ey"` 无输出
-- [ ] 7.5 归档本 change（需使用者明确指示后执行 `/opsx:archive`）— verify: `openspec list` 中无本 change；`openspec/specs/knowledge-qa-ui/spec.md` 已生成且与 delta 一致
+- [x] 7.5 归档本 change（需使用者明确指示后执行 `/opsx:archive`）— verify: `openspec list` 中无本 change；`openspec/specs/knowledge-qa-ui/spec.md` 已生成且与 delta 一致 —— **2026-09-30 归档（用户指示）：`knowledge-qa-ui` 主规格已生成（7 条需求 / 31 个场景与 delta 逐块一致，`openspec validate --specs` 通过），本 change 已移至 `openspec/changes/archive/2026-09-30-add-knowledge-qa-ui`，活动中不再有本 change**

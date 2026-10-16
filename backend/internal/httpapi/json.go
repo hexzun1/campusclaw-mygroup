@@ -14,9 +14,10 @@ func WriteJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+// errorBody is the shape of every error response.
 type errorBody struct {
 	Error string `json:"error"`
-}
+} // @name ErrorBody
 
 func WriteError(w http.ResponseWriter, status int, message string) {
 	WriteJSON(w, status, errorBody{Error: message})

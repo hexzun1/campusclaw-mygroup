@@ -42,7 +42,7 @@ const (
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
-}
+} // @name AskMessage
 
 // Request is a validated ask request.
 type Request struct {
@@ -55,7 +55,7 @@ type Request struct {
 type wireRequest struct {
 	Question string    `json:"question"`
 	Messages []Message `json:"messages"`
-}
+} // @name AskRequest
 
 // ParseRequest decodes and validates a request body. Every error it returns
 // describes a client mistake and maps to 400.

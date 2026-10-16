@@ -1,10 +1,14 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from './auth/AuthContext'
 import AppLayout from './components/AppLayout'
+import TeacherOnly from './components/TeacherOnly'
+import AgentsAdminPage from './pages/AgentsAdminPage'
 import AskPage from './pages/AskPage'
+import AssistantPage from './pages/AssistantPage'
 import LoginPage from './pages/LoginPage'
 import MaterialsPage from './pages/MaterialsPage'
 import SearchPage from './pages/SearchPage'
+import SkillsAdminPage from './pages/SkillsAdminPage'
 
 function Gate() {
   const { user, loading } = useAuth()
@@ -18,6 +22,11 @@ function Gate() {
         <Route path="/materials" element={<MaterialsPage />} />
         <Route path="/search" element={<SearchPage />} />
         <Route path="/ask" element={<AskPage />} />
+        <Route path="/assistant" element={<AssistantPage />} />
+        <Route element={<TeacherOnly />}>
+          <Route path="/admin/agents" element={<AgentsAdminPage />} />
+          <Route path="/admin/skills" element={<SkillsAdminPage />} />
+        </Route>
       </Route>
       <Route path="*" element={<Navigate to={user ? '/materials' : '/login'} replace />} />
     </Routes>

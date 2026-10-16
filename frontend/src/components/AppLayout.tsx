@@ -15,6 +15,13 @@ export default function AppLayout() {
           <NavLink to="/materials">材料</NavLink>
           <NavLink to="/search">知识检索</NavLink>
           <NavLink to="/ask">知识问答</NavLink>
+          <NavLink to="/assistant">助手</NavLink>
+          {user?.role === 'teacher' && (
+            <>
+              <NavLink to="/admin/agents">智能体管理</NavLink>
+              <NavLink to="/admin/skills">技能管理</NavLink>
+            </>
+          )}
         </nav>
         <div className="header-actions">
           <span className="who-am-i">

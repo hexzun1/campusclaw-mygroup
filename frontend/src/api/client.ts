@@ -3,6 +3,8 @@
 // Authorization header. No session id, username or role is ever stored — the
 // server's /api/me response is the single source of identity.
 
+import { createSSEParser } from './sse.ts'
+
 export interface Me {
   username: string
   role: 'teacher' | 'student'
@@ -115,12 +117,20 @@ async function safeJson(res: Response): Promise<{ error?: string } | null> {
   }
 }
 
+// login opts out of the automatic bearer attach so it can decide the header
+// itself: when a token is already stored, the login request carries it, and on
+// success the server revokes that old token before issuing the new one — a
+// rotated session never leaves two live tokens behind.
 export function login(username: string, password: string) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+
   return request<LoginResponse>(
     '/api/login',
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ username, password }),
     },
     false,
@@ -244,4 +254,201 @@ export async function downloadMaterialFile(id: number): Promise<void> {
   link.click()
   link.remove()
   URL.revokeObjectURL(url)
+}
+
+// --- Tutor: agents, skills, conversations and the streaming turn ---
+
+// A teacher's agent list carries prompt, enabled flag and binding ids; a
+// student's carries only id and name (server-side projection).
+export interface Agent {
+  id: number
+  name: string
+  prompt: string
+  enabled: boolean
+  skill_ids: number[]
+  material_ids: number[]
+}
+
+export interface AgentInput {
+  name: string
+  prompt: string
+  enabled: boolean
+  skill_ids: number[]
+  material_ids: number[]
+}
+
+export interface Skill {
+  id: number
+  name: string
+  trigger_text: string
+  subject_text: string
+  tools: string[]
+  description: string
+  // Present only in a teacher's response.
+  source_text: string
+  enabled: boolean
+}
+
+export interface ConversationSummary {
+  id: number
+  agent_id: number
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ConversationMessage {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  citations: Hit[] | null
+  skill_name: string
+  created_at: string
+}
+
+export interface ConversationDetail extends ConversationSummary {
+  messages: ConversationMessage[]
+}
+
+export function listAgents() {
+  return request<Agent[]>('/api/agents')
+}
+
+export function createAgent(input: AgentInput) {
+  return request<{ id: number }>('/api/agents', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export function updateAgent(id: number, input: AgentInput) {
+  return request<{ id: number }>(`/api/agents/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export function listSkills() {
+  return request<Skill[]>('/api/skills')
+}
+
+// Skill writes submit the raw skill file text; the server derives every field
+// from it.
+export function createSkill(source: string) {
+  return request<{ id: number }>('/api/skills', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source }),
+  })
+}
+
+export function updateSkill(id: number, source: string) {
+  return request<{ id: number }>(`/api/skills/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source }),
+  })
+}
+
+export function deleteSkill(id: number) {
+  return request<{ ok: boolean }>(`/api/skills/${id}`, { method: 'DELETE' })
+}
+
+export function listConversations() {
+  return request<ConversationSummary[]>('/api/conversations')
+}
+
+export function createConversation(agentID: number) {
+  return request<ConversationSummary>('/api/conversations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: agentID }),
+  })
+}
+
+export function getConversation(id: number) {
+  return request<ConversationDetail>(`/api/conversations/${id}`)
+}
+
+export interface StreamMeta {
+  status: string
+  skill: string | null
+  citations: Hit[]
+}
+
+export interface StreamHandlers {
+  onMeta: (meta: StreamMeta) => void
+  onDelta: (text: string) => void
+  onDone: (messageID: number) => void
+  onError: (message: string) => void
+}
+
+// streamConversation asks one question and reads the SSE answer with fetch —
+// the Authorization header cannot ride on the browser's native event-stream
+// client. Anything that fails before the stream starts is a plain JSON error —
+// 401 clears the token and returns to the login page, 503 shows the fixed
+// service text, and 400/404/409 keep the server's own error text. Mid-stream
+// failures arrive as an `error` event (generic text, no internal detail).
+export async function streamConversation(
+  id: number,
+  question: string,
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers = new Headers({ 'Content-Type': 'application/json' })
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+
+  const res = await fetch(`/api/conversations/${id}/stream`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ question }),
+    signal,
+  })
+
+  const isEventStream = (res.headers.get('Content-Type') ?? '').includes('text/event-stream')
+  if (!res.ok || !isEventStream) {
+    if (res.status === 401) {
+      clearToken()
+      unauthorizedHandler?.()
+      throw new ApiError(401, '未登录或会话已失效')
+    }
+    if (res.status === 503) throw new ApiError(503, '服务暂不可用')
+    const body = await safeJson(res)
+    throw new ApiError(res.status, body?.error ?? `请求失败（${res.status}）`)
+  }
+
+  const stream = res.body
+  if (!stream) throw new ApiError(res.status, '请求失败，请稍后重试')
+  const reader = stream.getReader()
+  const parser = createSSEParser((event) => {
+    if (event.event === 'meta') handlers.onMeta(JSON.parse(event.data) as StreamMeta)
+    else if (event.event === 'delta') handlers.onDelta((JSON.parse(event.data) as { text: string }).text)
+    else if (event.event === 'done') handlers.onDone((JSON.parse(event.data) as { message_id: number }).message_id)
+    else if (event.event === 'error') handlers.onError((JSON.parse(event.data) as { message: string }).message)
+  })
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      parser.feed(value)
+    }
+    parser.end()
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+// errorText is the text a tutor page shows for a failed request: null when
+// nothing is shown (a 401 has already returned to the login page, an abort
+// belongs to a view that is going away), otherwise the message the call
+// attached — the server's own error text, the fixed stream texts, or a
+// generic fallback.
+export function errorText(err: unknown): string | null {
+  if (err instanceof DOMException && err.name === 'AbortError') return null
+  if (err instanceof ApiError) return err.status === 401 ? null : err.message
+  return '请求失败，请稍后重试'
 }

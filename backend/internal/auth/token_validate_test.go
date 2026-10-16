@@ -21,25 +21,35 @@ func testIssuer(secret string) *TokenIssuer {
 	return i
 }
 
-// baseClaims is a fully valid payload; each case mutates one field.
-func baseClaims() Claims {
-	return Claims{
-		UserID:   7,
-		Username: "teacher_a",
-		Role:     "teacher",
-		ClassID:  1,
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    Issuer,
-			IssuedAt:  jwt.NewNumericDate(testNow),
-			ExpiresAt: jwt.NewNumericDate(testNow.Add(24 * time.Hour)),
-			ID:        "0123456789abcdef0123456789abcdef",
-		},
+// basePayload is a fully valid payload; each case mutates one key.
+func basePayload() map[string]any {
+	return map[string]any{
+		"sub": "7",
+		"jti": "0123456789abcdef0123456789abcdef",
+		"iat": testNow.Unix(),
+		"exp": testNow.Add(24 * time.Hour).Unix(),
+		"iss": Issuer,
 	}
 }
 
-func signWith(t *testing.T, method jwt.SigningMethod, key string, c Claims) string {
+// oldPayload is the previous token format: identity claims in the payload and
+// no sub. Its signature is valid under the same key.
+func oldPayload() map[string]any {
+	return map[string]any{
+		"user_id":  7,
+		"username": "teacher_a",
+		"role":     "teacher",
+		"class_id": 1,
+		"jti":      "0123456789abcdef0123456789abcdef",
+		"iat":      testNow.Unix(),
+		"exp":      testNow.Add(24 * time.Hour).Unix(),
+		"iss":      Issuer,
+	}
+}
+
+func signMap(t *testing.T, method jwt.SigningMethod, key string, payload map[string]any) string {
 	t.Helper()
-	signed, err := jwt.NewWithClaims(method, c).SignedString([]byte(key))
+	signed, err := jwt.NewWithClaims(method, jwt.MapClaims(payload)).SignedString([]byte(key))
 	if err != nil {
 		t.Fatalf("sign fixture: %v", err)
 	}
@@ -72,7 +82,7 @@ func reencode(t *testing.T, token string, mutate func(map[string]any)) string {
 func unsignedNone(t *testing.T) string {
 	t.Helper()
 	header, _ := json.Marshal(map[string]string{"alg": "none", "typ": "JWT"})
-	payload, err := json.Marshal(baseClaims())
+	payload, err := json.Marshal(basePayload())
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
@@ -80,14 +90,17 @@ func unsignedNone(t *testing.T) string {
 		base64.RawURLEncoding.EncodeToString(payload) + "."
 }
 
-func TestParseTokenMatrix(t *testing.T) {
+// tweaked signs a copy of the valid payload with one key changed (or deleted).
+func tweaked(t *testing.T, mutate func(map[string]any)) string {
+	t.Helper()
+	m := basePayload()
+	mutate(m)
+	return signMap(t, jwt.SigningMethodHS256, testSecret, m)
+}
+
+func TestParseMatrix(t *testing.T) {
 	issuer := testIssuer(testSecret)
-	valid := signWith(t, jwt.SigningMethodHS256, testSecret, baseClaims())
-	studentToken := func() string {
-		c := baseClaims()
-		c.Role = "student"
-		return signWith(t, jwt.SigningMethodHS256, testSecret, c)
-	}()
+	valid := signMap(t, jwt.SigningMethodHS256, testSecret, basePayload())
 
 	cases := []struct {
 		name    string
@@ -95,56 +108,46 @@ func TestParseTokenMatrix(t *testing.T) {
 		wantErr bool
 	}{
 		{"valid token", valid, false},
-		{"valid token with student role", studentToken, false},
-		{"signed with another key", signWith(t, jwt.SigningMethodHS256, "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", baseClaims()), true},
-		{"payload tampered, signature not recomputed", reencode(t, studentToken, func(m map[string]any) {
+		{"signed with another key", signMap(t, jwt.SigningMethodHS256, "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", basePayload()), true},
+		{"role added, signature not recomputed", reencode(t, valid, func(m map[string]any) {
 			m["role"] = "teacher"
 		}), true},
-		{"class_id tampered, signature not recomputed", reencode(t, studentToken, func(m map[string]any) {
-			m["class_id"] = float64(2)
+		{"sub changed, signature not recomputed", reencode(t, valid, func(m map[string]any) {
+			m["sub"] = "8"
 		}), true},
 		{"alg=none", unsignedNone(t), true},
-		{"HS512", signWith(t, jwt.SigningMethodHS512, testSecret, baseClaims()), true},
-		{"expired", signWith(t, jwt.SigningMethodHS256, testSecret, func() Claims {
-			c := baseClaims()
-			c.ExpiresAt = jwt.NewNumericDate(testNow.Add(-time.Minute))
-			return c
-		}()), true},
-		{"issuer mismatch", signWith(t, jwt.SigningMethodHS256, testSecret, func() Claims {
-			c := baseClaims()
-			c.Issuer = "other"
-			return c
-		}()), true},
-		{"missing jti", signWith(t, jwt.SigningMethodHS256, testSecret, func() Claims {
-			c := baseClaims()
-			c.ID = ""
-			return c
-		}()), true},
-		{"missing exp", signWith(t, jwt.SigningMethodHS256, testSecret, func() Claims {
-			c := baseClaims()
-			c.ExpiresAt = nil
-			return c
-		}()), true},
-		{"missing role", signWith(t, jwt.SigningMethodHS256, testSecret, func() Claims {
-			c := baseClaims()
-			c.Role = ""
-			return c
-		}()), true},
-		{"unknown role", signWith(t, jwt.SigningMethodHS256, testSecret, func() Claims {
-			c := baseClaims()
-			c.Role = "admin"
-			return c
-		}()), true},
-		{"missing class_id", signWith(t, jwt.SigningMethodHS256, testSecret, func() Claims {
-			c := baseClaims()
-			c.ClassID = 0
-			return c
-		}()), true},
-		{"missing user_id", signWith(t, jwt.SigningMethodHS256, testSecret, func() Claims {
-			c := baseClaims()
-			c.UserID = 0
-			return c
-		}()), true},
+		{"HS512", signMap(t, jwt.SigningMethodHS512, testSecret, basePayload()), true},
+		{"expired", tweaked(t, func(m map[string]any) {
+			m["exp"] = testNow.Add(-time.Minute).Unix()
+		}), true},
+		{"issuer mismatch", tweaked(t, func(m map[string]any) {
+			m["iss"] = "other"
+		}), true},
+		{"missing sub", tweaked(t, func(m map[string]any) {
+			delete(m, "sub")
+		}), true},
+		{"missing jti", tweaked(t, func(m map[string]any) {
+			delete(m, "jti")
+		}), true},
+		{"missing exp", tweaked(t, func(m map[string]any) {
+			delete(m, "exp")
+		}), true},
+		{"sub not a number", tweaked(t, func(m map[string]any) {
+			m["sub"] = "abc"
+		}), true},
+		{"sub zero", tweaked(t, func(m map[string]any) {
+			m["sub"] = "0"
+		}), true},
+		{"sub negative", tweaked(t, func(m map[string]any) {
+			m["sub"] = "-1"
+		}), true},
+		{"sub as JSON number", tweaked(t, func(m map[string]any) {
+			m["sub"] = 7
+		}), true},
+		{"jti empty", tweaked(t, func(m map[string]any) {
+			m["jti"] = ""
+		}), true},
+		{"old format token, signature valid", signMap(t, jwt.SigningMethodHS256, testSecret, oldPayload()), true},
 		{"not three segments", "abc.def", true},
 		{"garbage", "not-a-token", true},
 		{"empty", "", true},
@@ -170,8 +173,14 @@ func TestParseTokenMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse(%s) = %v, want success", tc.name, err)
 			}
-			if claims.UserID != 7 || claims.ClassID != 1 || claims.Username != "teacher_a" {
-				t.Errorf("claims = %+v, want the issued identity", claims)
+			if claims.UserID != 7 {
+				t.Errorf("UserID = %d, want 7", claims.UserID)
+			}
+			if claims.JTI != "0123456789abcdef0123456789abcdef" {
+				t.Errorf("JTI = %q, want the fixture jti", claims.JTI)
+			}
+			if !claims.ExpiresAt.Equal(testNow.Add(24 * time.Hour)) {
+				t.Errorf("ExpiresAt = %v, want %v", claims.ExpiresAt, testNow.Add(24*time.Hour))
 			}
 		})
 	}
@@ -182,19 +191,22 @@ func TestParseTokenMatrix(t *testing.T) {
 func TestParseAcceptsRoundTrip(t *testing.T) {
 	issuer := testIssuer(testSecret)
 
-	token, err := issuer.Issue(42, "student_b1", "student", 2)
+	token, err := issuer.Issue(42)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	claims, err := issuer.Parse(token)
+	parsed, err := issuer.Parse(token)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if claims.UserID != 42 || claims.Username != "student_b1" || claims.Role != "student" || claims.ClassID != 2 {
-		t.Errorf("claims = %+v, want the issued identity", claims)
+	if parsed.UserID != 42 {
+		t.Errorf("UserID = %d, want 42", parsed.UserID)
 	}
-	if claims.ID == "" || claims.ExpiresAt == nil || claims.IssuedAt == nil || claims.Issuer != Issuer {
-		t.Errorf("registered claims incomplete: %+v", claims.RegisteredClaims)
+	if len(parsed.JTI) != 32 {
+		t.Errorf("JTI = %q, want 32 hex characters", parsed.JTI)
+	}
+	if !parsed.ExpiresAt.Equal(testNow.Add(24 * time.Hour)) {
+		t.Errorf("ExpiresAt = %v, want %v", parsed.ExpiresAt, testNow.Add(24*time.Hour))
 	}
 }
 
@@ -203,7 +215,7 @@ func TestParseAcceptsRoundTrip(t *testing.T) {
 // when the clock is moved back before its exp.
 func TestParseExpiryUsesInjectedClock(t *testing.T) {
 	signer := testIssuer(testSecret)
-	token, err := signer.Issue(1, "teacher_a", "teacher", 1)
+	token, err := signer.Issue(1)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}

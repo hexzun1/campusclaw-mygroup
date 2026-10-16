@@ -28,7 +28,7 @@ func NewHandlers(engine *Engine) *Handlers { return &Handlers{Engine: engine} }
 type askResponse struct {
 	Answer    string       `json:"answer"`
 	Citations []search.Hit `json:"citations"`
-}
+} // @name AskResponse
 
 // Ask implements POST /api/ask: it answers the question from the caller's class
 // knowledge base, with citations, or with the not-found hint when retrieval
@@ -36,6 +36,19 @@ type askResponse struct {
 //
 // The class scope is the session's alone; a class_id in the query string,
 // headers or body is ignored (spec: 检索的权限与班级范围).
+//
+// @Summary 带引用的问答
+// @Description 一次性返回完整回答与出处（不流式）。没有命中时不调用对话网关：answer 为「资料中未找到相关内容」、citations 为空。messages 只保留 user / assistant 角色，system 一律丢弃。回答中的 [n] 对应 citations[n-1]。
+// @Tags 问答
+// @Accept json
+// @Produce json
+// @Param request body wireRequest true "问题与可选历史"
+// @Success 200 {object} askResponse "answer、citations"
+// @Failure 400 {object} httpapi.errorBody "问题为空或超长、请求格式错误"
+// @Failure 401 {object} httpapi.errorBody "未登录或会话已失效"
+// @Failure 503 {object} httpapi.errorBody "检索或对话依赖不可用"
+// @Security BearerAuth
+// @Router /api/ask [post]
 func (h *Handlers) Ask(w http.ResponseWriter, r *http.Request) {
 	su := httpapi.SessionUserFromContext(r.Context())
 

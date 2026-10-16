@@ -22,16 +22,15 @@ type Class struct {
 	Name string
 }
 
-// SessionUser is the identity attached to an authenticated request. It is
-// built from the verified token's claims (the `sessions` table is no longer
-// read) and is the only source of role and class for business handlers.
+// SessionUser is the identity attached to an authenticated request. The token
+// only proves who the caller is; every field here is read from the database on
+// each request, so role and class changes take effect without a re-login.
+// Business handlers read identity from this struct and nowhere else.
 type SessionUser struct {
-	UserID   int
-	Username string
-	Role     Role
-	ClassID  int
-	// ClassName is not a token claim: it stays empty unless a handler resolves
-	// it from class_id.
+	UserID    int
+	Username  string
+	Role      Role
+	ClassID   int
 	ClassName string
 }
 

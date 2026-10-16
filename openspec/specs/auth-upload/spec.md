@@ -8,14 +8,14 @@
 
 ### Requirement: 登录与会话
 
-系统 MUST 提供教师（teacher）、学生（student）两类角色的账号密码登录。登录成功后，系统 MUST 在响应 JSON 中返回一个 JWT（字段 `token`），MUST NOT 设置会话 Cookie。token MUST 使用 HS256 签名，载荷 MUST 包含 `user_id`、`username`、`role`、`class_id`、`iss`（值为 `campusclaw-api`）、`iat`、`exp`（签发后 24 小时）与每个 token 唯一的 `jti`，MUST NOT 包含口令或口令哈希。除 `POST /api/login` 与 `GET /health` 外，所有 `/api` 请求 MUST 携带 `Authorization: Bearer <token>`；token 缺失、格式错误、签名错误、算法不是 HS256、已过期、`iss` 不符、载荷缺少必需项，或其 `jti` 已被吊销，MUST 一律返回 401，且响应体 MUST NOT 包含业务数据。放在 query、Cookie 或请求体中的 token MUST 被忽略。`role` 与 `class_id` MUST 只取自已验签的 token。登出 MUST 使该 token 的 `jti` 立即失效，其它 token 不受影响。系统 MUST 提供返回当前身份的接口。本规约中的"会话"指一次有效的登录状态，即已验签、未过期、未吊销的 token；"会话班级""会话角色"指该 token 中的 `class_id` 与 `role`。
+系统 MUST 提供教师（teacher）、学生（student）两类角色的账号密码登录。登录成功后，系统 MUST 在响应 JSON 中返回一个 JWT（字段 `token`，响应体仍为 `{token, username, role}`），MUST NOT 设置会话 Cookie。token MUST 使用 HS256 签名，载荷 MUST 恰好由 `sub`（用户 ID 的十进制字符串）、`jti`（每个 token 唯一）、`iat`、`exp`（签发后 24 小时）与 `iss`（值为 `campusclaw-api`）五项组成，MUST NOT 包含用户名、角色、班级、口令或口令哈希。除 `POST /api/login` 与 `GET /health` 外，所有 `/api` 请求 MUST 携带 `Authorization: Bearer <token>`，服务端 MUST 按以下顺序认证：① 取 Bearer 凭据；② 验签——只接受 HS256、`exp` 必须存在且未过期、`iss` 必须匹配、载荷必须恰为上述五项且 `sub` 为正整数，这一步不查数据库，任一不满足返回 401；③ 查吊销表，已吊销返回 401，查询出错返回 503；④ 按 `sub` 读取用户并连同其班级，用户不存在返回 401，查询出错返回 503；⑤ 把用户 ID、用户名、角色、班级写入请求上下文。角色与班级 MUST 只取自第 ④ 步的数据库结果，MUST NOT 采信 token 中的声明或请求参数。所有认证失败的 401 响应体 MUST 相同且不含业务数据。放在 query、Cookie 或请求体中的 token MUST 被忽略。登出 MUST 使该 token 的 `jti` 立即失效，其它 token 不受影响。登录请求若在 `Authorization` 头中携带通过 ①–③ 的旧 token，登录成功时 MUST 先吊销该旧 token 的 `jti` 再签发新 token；登录失败时旧 token MUST 不受影响；携带的 token 无效时 MUST 不影响登录本身。系统 MUST 提供返回当前身份的接口 `GET /api/me`，返回字段保持为用户名、角色、班级编号与班级名。本规约中的"会话"指一次有效的登录状态，即通过上述 ①–④ 的 token；"会话班级""会话角色"指第 ④ 步从数据库读到的该用户当前的 `class_id` 与 `role`。
 
 #### Scenario: 登录成功
 
 - **WHEN** teacher_a、student_a1 或 student_b1 使用正确口令调用 `POST /api/login`
-- **THEN** 响应 MUST 为 200，JSON 中 MUST 含 `token`，且响应 MUST NOT 设置任何会话 Cookie
-- **AND** token 头部的算法 MUST 为 HS256，载荷 MUST 含 `user_id`、`username`、`role`、`class_id`、`iss=campusclaw-api`、`iat`、`exp`、`jti`，且 `exp - iat` MUST 等于 24 小时
-- **AND** 随后以该 token 作 Bearer 调用 `GET /api/me` MUST 返回该用户的用户名、角色与所属班级
+- **THEN** 响应 MUST 为 200，JSON MUST 恰含 `token`、`username`、`role`，且响应 MUST NOT 设置任何会话 Cookie
+- **AND** token 头部的算法 MUST 为 HS256，载荷的键集合 MUST 恰为 `sub`、`jti`、`iat`、`exp`、`iss`，`iss` 为 `campusclaw-api`，`exp - iat` MUST 等于 24 小时
+- **AND** 随后以该 token 作 Bearer 调用 `GET /api/me` MUST 返回该用户的用户名、角色、班级编号与班级名
 
 #### Scenario: 登录失败提示统一
 
@@ -29,11 +29,21 @@
 - **THEN** 在锁定期内该请求 MUST 被拒绝
 - **AND** 响应 MUST 与口令错误时完全相同，不提示已被锁定，且 MUST NOT 含 token
 
+#### Scenario: 携带旧 token 再次登录
+
+- **WHEN** 已持有有效 token 甲的用户在 `Authorization` 头中携带甲并再次登录成功，得到 token 乙
+- **THEN** 甲与乙的 `jti` MUST 不同
+- **AND** 之后用甲调用任何 `/api` 接口 MUST 返回 401，用乙 MUST 正常
+
 #### Scenario: 重新登录签发新 token
 
-- **WHEN** 已持有有效 token 的用户再次登录成功
-- **THEN** 系统 MUST 签发 `jti` 与原 token 不同的新 token
-- **AND** 原 token 在其自身过期或被登出吊销之前 MUST 仍然有效
+- **WHEN** 已持有有效 token 甲的用户在另一处不带 `Authorization` 头登录成功，得到 token 乙
+- **THEN** 甲在其自身过期或被登出吊销之前 MUST 仍然有效
+
+#### Scenario: 登录失败不影响旧 token
+
+- **WHEN** 用户携带有效 token 甲调用登录，但口令错误
+- **THEN** 响应 MUST 为 401，甲 MUST 仍然有效
 
 #### Scenario: 登出后旧 token 失效
 
@@ -44,13 +54,13 @@
 
 #### Scenario: 未登录访问受保护接口
 
-- **WHEN** 不带 `Authorization` 头调用 `GET /api/me`、`POST /api/logout`、`GET /api/materials`、`GET /api/materials/{id}`、`GET /api/materials/{id}/file` 或 `POST /api/materials`
+- **WHEN** 不带 `Authorization` 头调用 `GET /api/me`、`POST /api/logout`、`GET /api/materials`、`GET /api/materials/{id}`、`GET /api/materials/{id}/file`、`POST /api/materials`、`GET /api/agents`、`GET /api/skills`、`GET /api/conversations` 或 `POST /api/conversations/{id}/stream`
 - **THEN** 每个请求 MUST 返回 401
-- **AND** 响应体 MUST NOT 包含任何材料标题、正文或文件内容
+- **AND** 响应体 MUST NOT 包含任何业务数据
 
 #### Scenario: 签名错误的 token 被拒绝
 
-- **WHEN** 使用另一把密钥签发、或载荷被篡改（如把 `role` 改成 `teacher`、把 `class_id` 改成班级 B）而签名未重算的 token 调用 `GET /api/me`
+- **WHEN** 使用另一把密钥签发、或载荷被篡改（如加入 `role=teacher`、改动 `sub`）而签名未重算的 token 调用 `GET /api/me`
 - **THEN** 响应 MUST 为 401
 
 #### Scenario: 过期的 token 被拒绝
@@ -65,8 +75,18 @@
 
 #### Scenario: 载荷缺项的 token 被拒绝
 
-- **WHEN** 使用签名正确但缺少 `jti`、`exp`、`role` 或 `class_id` 之一的 token 调用 `GET /api/me`
+- **WHEN** 使用签名正确但缺少 `sub`、`jti` 或 `exp` 之一，或 `sub` 不是正整数的 token 调用 `GET /api/me`
 - **THEN** 每次响应 MUST 为 401
+
+#### Scenario: 旧格式 token 被拒绝
+
+- **WHEN** 使用签名正确、未过期，但载荷含 `user_id`、`username`、`role` 或 `class_id` 的旧格式 token 调用 `GET /api/me`
+- **THEN** 响应 MUST 为 401
+
+#### Scenario: 用户被删除后 token 立即失效
+
+- **WHEN** 在数据库中删除某用户后，用该用户此前签发且未过期的 token 调用 `GET /api/me`
+- **THEN** 响应 MUST 为 401
 
 #### Scenario: token 只认 Authorization 头
 
@@ -86,7 +106,7 @@
 
 ### Requirement: 角色权限
 
-系统 MUST 仅依据已验签 token 中的角色授权：教师可上传、查看、下载本班材料；学生只能查看和下载本班材料。客户端在表单、Header、query 中声明的角色 MUST 被忽略。
+系统 MUST 仅依据会话角色授权，即按 token 的 `sub` 从数据库读到的该用户**当前**角色：教师可上传、查看、下载本班材料；学生只能查看和下载本班材料。token 中的任何声明以及客户端在表单、Header、query 中声明的角色 MUST 被忽略。在数据库中修改用户角色后，该用户的下一次请求 MUST 按新角色授权，无需等待 token 过期。
 
 #### Scenario: 学生上传被拒绝
 
@@ -102,7 +122,7 @@
 
 #### Scenario: 篡改 token 提升角色无效
 
-- **WHEN** 把 student_a1 的 token 载荷中的 `role` 改成 `teacher`（签名未重算）后提交上传请求
+- **WHEN** 在 student_a1 的 token 载荷中加入 `role=teacher`（签名未重算）后提交上传请求
 - **THEN** 响应 MUST 为 401，数据库与上传目录均无变化
 
 #### Scenario: 教师上传被允许
@@ -110,9 +130,14 @@
 - **WHEN** teacher_a 携带有效会话提交一份合法的 `.md` 文件
 - **THEN** 响应 MUST 为 201 并返回新材料的 ID 与标题
 
+#### Scenario: 数据库中的角色变更立即生效
+
+- **WHEN** 在数据库中把 teacher_a 的角色改为 `student` 后，用其原 token 提交上传请求；再把角色改回 `teacher` 并重试
+- **THEN** 第一次 MUST 返回 403，第二次 MUST 返回 201，两次都 MUST NOT 需要重新登录
+
 ### Requirement: 班级隔离
 
-班级是数据边界，只取自已验签的 token。所有材料与知识库的读写 MUST 在服务端按会话班级校验；请求中携带的班级参数 MUST 被忽略；跨班访问与访问不存在的记录 MUST 返回相同的 404 响应。
+班级是数据边界，只取自会话班级，即按 token 的 `sub` 从数据库读到的该用户**当前**班级。所有材料与知识库的读写 MUST 在服务端按会话班级校验；token 中的声明与请求中携带的班级参数 MUST 被忽略；跨班访问与访问不存在的记录 MUST 返回相同的 404 响应。在数据库中修改用户的班级后，该用户的下一次请求 MUST 按新班级划定数据边界，无需等待 token 过期。
 
 #### Scenario: 列表只含本班
 
@@ -127,8 +152,13 @@
 
 #### Scenario: 篡改 token 中的班级无效
 
-- **WHEN** 把 student_a1 的 token 载荷中的 `class_id` 改成班级 B 的 ID（签名未重算）后调用 `GET /api/materials`
+- **WHEN** 在 student_a1 的 token 载荷中加入 `class_id=<班级 B 的 ID>`（签名未重算）后调用 `GET /api/materials`
 - **THEN** 响应 MUST 为 401，响应体 MUST NOT 含任何班级 B 的材料
+
+#### Scenario: 数据库中的班级变更立即生效
+
+- **WHEN** 在数据库中把 student_a1 的 `class_id` 改为班级 B，然后用其原 token 调用 `GET /api/materials`；再把 `class_id` 改回班级 A 并重试
+- **THEN** 第一次 MUST 只返回班级 B 的材料，第二次 MUST 只返回班级 A 的材料，两次都 MUST NOT 需要重新登录
 
 #### Scenario: 跨班按 ID 访问返回 404
 
@@ -302,7 +332,7 @@
 
 ### Requirement: 前端页面行为
 
-前端 MUST 通过同源 `/api` 调用后端。登录成功后前端 MUST 把 token 保存在 `sessionStorage` 中，并在除登录外的每个 API 请求上加 `Authorization: Bearer <token>` 头；除 token 外 MUST NOT 在任何 Web Storage 中保存会话 ID、用户名、角色等身份信息，MUST NOT 把 token 保存在 `localStorage`，MUST NOT 依赖 Cookie。身份以 `GET /api/me` 为准；界面只决定"显示什么"，不承担访问控制。原文件下载 MUST 通过带 `Authorization` 头的请求完成，MUST NOT 依赖不带该头的链接导航。登出与收到 401 时前端 MUST 清除 token。
+前端 MUST 通过同源 `/api` 调用后端。登录成功后前端 MUST 把 token 保存在 `sessionStorage` 中（替换此前保存的 token），并在每个 API 请求上加 `Authorization: Bearer <token>` 头；登录请求在 `sessionStorage` 中已有 token 时 MUST 也携带它，以便服务端吊销旧 token。除 token 外 MUST NOT 在任何 Web Storage 中保存会话 ID、用户名、角色等身份信息，MUST NOT 把 token 保存在 `localStorage`，MUST NOT 依赖 Cookie。身份以 `GET /api/me` 为准；界面只决定"显示什么"，不承担访问控制。原文件下载 MUST 通过带 `Authorization` 头的请求完成，MUST NOT 依赖不带该头的链接导航。登出与收到 401 时前端 MUST 清除 token。
 
 #### Scenario: 刷新后以服务端身份为准
 
@@ -313,12 +343,18 @@
 #### Scenario: 请求携带 Bearer 头且不依赖 Cookie
 
 - **WHEN** 已登录用户在材料页执行列表、搜索、详情、上传等操作
-- **THEN** 除登录外的每个 `/api` 请求 MUST 带 `Authorization: Bearer <token>` 头
+- **THEN** 每个 `/api` 请求 MUST 带 `Authorization: Bearer <token>` 头
 - **AND** 浏览器中 MUST 不存在本站的会话 Cookie，功能 MUST 不受影响
+
+#### Scenario: 已有 token 时登录会携带它
+
+- **WHEN** `sessionStorage` 中已存有 token 甲时，用户在登录页提交登录并成功
+- **THEN** 登录请求 MUST 带 `Authorization: Bearer <甲>`
+- **AND** 登录后 `sessionStorage` 中 MUST 只有新 token，甲 MUST 已被服务端吊销
 
 #### Scenario: 收到 401 回到登录页
 
-- **WHEN** 材料页中的任一接口调用返回 401
+- **WHEN** 任一页面中的接口调用返回 401
 - **THEN** 前端 MUST 清除 token、清空当前用户状态并跳转登录页
 
 #### Scenario: 登出清除 token
@@ -373,21 +409,26 @@
 
 ### Requirement: 浏览器端防护响应头
 
-token 由前端脚本持有，因此系统 MUST 降低脚本注入与响应被缓存重放的风险：所有 `/api` 响应（包括 401、404、503 等错误响应）MUST 带 `Cache-Control: no-store`；前端页面响应 MUST 带内容安全策略头，脚本与连接来源 MUST 限制为同源，且 MUST NOT 允许内联脚本与 `eval`，MUST 禁止 `object` 与被其它站点嵌入框架。这些措施 MUST NOT 破坏登录、列表、搜索、详情、上传、下载与主题切换功能。
+token 由前端脚本持有，因此系统 MUST 降低脚本注入与响应被缓存重放的风险：除流式提问接口外，所有 `/api` 响应（包括 401、404、503 等错误响应）MUST 带 `Cache-Control: no-store`；流式提问接口以事件流返回时 MUST 带 `Cache-Control: no-cache`（它是 POST 响应，不会被浏览器缓存），在事件流开始之前返回的 JSON 错误仍 MUST 带 `Cache-Control: no-store`。前端页面与 `/swagger` 文档页面的响应 MUST 带内容安全策略头，脚本与连接来源 MUST 限制为同源，且 MUST NOT 允许内联脚本与 `eval`，MUST 禁止 `object` 与被其它站点嵌入框架。这些措施 MUST NOT 破坏登录、列表、搜索、详情、上传、下载、主题切换、助手会话、智能体与技能管理以及接口文档的功能。
 
 #### Scenario: API 响应不可缓存
 
-- **WHEN** 任意 `/api` 请求得到响应（成功或 401、404、503）
+- **WHEN** 任意非流式 `/api` 请求得到响应（成功或 401、404、503），或流式提问接口在事件流开始前返回 JSON 错误
 - **THEN** 响应头 MUST 含 `Cache-Control: no-store`
+
+#### Scenario: 事件流的缓存头
+
+- **WHEN** 流式提问接口开始返回事件流
+- **THEN** 响应头 MUST 含 `Cache-Control: no-cache`
 
 #### Scenario: 页面带内容安全策略
 
-- **WHEN** 请求前端页面
+- **WHEN** 请求前端页面或 `/swagger/` 文档页面
 - **THEN** 响应头 MUST 含内容安全策略，其 `script-src` MUST 只允许同源，且 MUST NOT 含 `unsafe-inline` 与 `unsafe-eval`
 - **AND** MUST 禁止 `object` 并限制被嵌入框架
 
 #### Scenario: 策略下功能正常
 
-- **WHEN** 在带该策略的页面上依次执行登录、列表、搜索、详情、上传、下载、主题切换、登出
+- **WHEN** 在带该策略的页面上依次执行登录、列表、搜索、详情、上传、下载、主题切换、助手会话提问、智能体与技能管理、在文档页面试调接口、登出
 - **THEN** 每项功能 MUST 正常完成
 - **AND** 浏览器控制台 MUST 无内容安全策略违规报告

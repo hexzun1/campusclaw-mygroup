@@ -2,13 +2,14 @@
 
 - **价值**：面向中小学的教研智能体，把分散在群文件与网盘里的教学材料集中进按班级隔离的知识库，让班内成员能按内容检索，并获得带材料出处的回答。
 - **场景**：教师登录后上传并管理本班教学材料；学生登录后只读查看、下载并检索本班材料，也可向本班知识库提问；不同班级之间数据互不可见。
-- **本学期不做**：作业流程、注册与找回密码、OAuth/SSO、平台超级管理员、跨班检索、重排序、流式对话、多轮记忆与 Agent、PDF/Word 解析、公网部署与多副本高可用。
+- **本学期不做**：作业流程、注册与找回密码、OAuth/SSO、平台超级管理员、跨班检索、重排序、由模型自主选择技能与真实工具调用（MCP）、跨班共享智能体或技能、会话删除与重命名、PDF/Word 解析、公网部署与多副本高可用。
 
 ## 当前迭代
 
 - 迭代 1（v0.1.0-auth-upload）：登录与角色权限、班级数据隔离、材料上传与知识库入库。规约见 `openspec/changes/add-auth-rbac-class-knowledge/`。
 - 迭代 2（v0.2.0-vector-retrieval）：正文切片与向量索引、班级内检索（关键词 / 向量 / 混合）、带引用的问答。规约见 `openspec/changes/add-traceable-vector-retrieval/`。
 - 迭代 3（v0.3.0-knowledge-qa-ui）：新增「知识检索」与「知识问答」两个前端页面（三种检索模式、带出处的回答卡片、每题独立且不保存历史）。规约见 `openspec/changes/add-knowledge-qa-ui/`。
+- 迭代 4（v0.4.0-tutor-agents-skills-streaming）：教师可配置的智能体与技能、按「适用条件」命中的技能路由、带最近历史与出处的流式助手会话（SSE），以及 `/swagger/` 接口文档；JWT 载荷精简为 `sub`/`jti`/`iat`/`exp`/`iss`，改库角色与班级下一次请求即生效，发布后所有旧 token 失效需重新登录。规约见 `openspec/changes/add-tutor-agents-skills-streaming/`。
 
 - 技术栈：React + TypeScript + Vite（前端）/ Go net/http（后端）/ MySQL 8.0 / Qdrant 向量库 / Nginx / Docker Compose
 - 部署形态：单实例 Docker Compose，只暴露 web 端口（默认 8080）
@@ -29,23 +30,24 @@ docker compose up --build -d
 
 - 登录地址：http://localhost:8080 （`WEB_PORT` 未设置时默认 8080；被占用可在 `.env` 中修改 `WEB_PORT`）
 - 健康检查：http://localhost:8080/health → `{"status":"ok"}`，无需登录
+- 接口文档：http://localhost:8080/swagger/ （开发编排下为 http://localhost:8081/swagger/；无需登录，可点「Authorize」填入 `Bearer <token>` 试调接口）
 - 共四个服务：web、api、db、qdrant。只有 web 映射宿主端口；db（3306）与 qdrant（6333/6334）只在 Compose 网络内可达
 
 ### 本地开发：不接真实模型（确定性网关桩）
 
-没有真实嵌入 / 对话网关时，用开发编排也能跑通上传、检索与问答：
+没有真实嵌入 / 对话网关时，用开发编排也能跑通上传、检索、问答与助手的流式会话：
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d
 ```
 
 - 端口只绑 `127.0.0.1`：api → 8081、db → 3306、qdrant → 6333、网关桩 → 8090
-- 网关桩（源码在 `backend/cmd/stubgateway`）是确定性实现：`/embeddings` 把字符二元组哈希成 `EMBEDDING_DIM` 维向量；`/chat/completions` 回显服务端给出的资料编号；`GET /stats` 查看两个接口的调用计数与最近一次请求体；`POST /control` 切换故障：`{"embed_fail":true}`、`{"chat_fail":true}`、`{"out_of_range_citation":true}`
+- 网关桩（源码在 `backend/cmd/stubgateway`）是确定性实现：`/embeddings` 把字符二元组哈希成 `EMBEDDING_DIM` 维向量；`/chat/completions` 回显服务端给出的资料编号（流式请求把回答按每 3 字一段返回）；`GET /stats` 查看两个接口的调用计数、最近一次请求体与当前开关；`POST /control` 可逐个切换开关（未提到的保持不变）：`{"embed_fail":true}` 嵌入失败、`{"chat_fail":true}` 对话失败（流式与非流式都失败）、`{"out_of_range_citation":true}` 回答多带一个越界引用 `[9]`、`{"fail_before_first_delta":true}` 流式回答在首段之前失败、`{"abort_after_deltas":2}` 推 2 段后断开（`-1` 关闭）、`{"chat_text":"..."}` 替换回答文字（`""` 恢复回显）
 - 用桩时把 `.env` 里的 `EMBEDDING_BASE_URL` 与 `CHAT_BASE_URL` 改为 `http://stubgateway:8090`，密钥随意；桩只存在于开发编排与源码，不进正式镜像
 
 ### 页面用法：知识检索与知识问答
 
-登录后页面顶部有三个标签：「材料」「知识检索」「知识问答」，教师与学生看到并可以使用的功能相同。
+登录后页面顶部共有六个标签：「材料」「知识检索」「知识问答」「助手」对教师与学生相同，「智能体管理」「技能管理」仅教师可见。本节先讲「知识检索」与「知识问答」，其余见下两节。
 
 - **知识检索**（`/search`）：输入问句（最长 500 字，去掉空白为空时不提交），选择模式后提交；结果按接口顺序逐条给出材料标题、切片序号、字符区间与摘录。三种模式：
   - 混合（`hybrid`，默认）：关键词与向量两路各取候选、融合排序；
@@ -54,6 +56,12 @@ docker compose -f docker-compose.dev.yml up -d
 - **知识问答**（`/ask`）：就本班材料提问（最长 1000 字）。每个问题独立提交：请求只带当前问题，不带此前对话，问答**不保存历史**（刷新或切换标签后清空）；有依据时显示「依据回答」卡片与按顺序编号 `[1]`、`[2]`… 的出处列表，没有命中时不调用模型，只显示「资料中未找到相关内容」。
 - 两个页面都只把接口返回的内容按纯文本显示（不解析 HTML / Markdown），并原样保留接口给出的顺序与编号。
 - 接口返回 **503**（向量库或网关不可用）时页面显示「检索服务暂不可用」：在检索页换用「关键词」模式仍可正常使用。
+
+### 页面用法：助手与教师管理页
+
+- **助手**（`/assistant`）：左侧是本人会话列表（按最近更新倒序）与「新建会话」（下拉只列本班已启用的智能体，会话创建后锁定所选智能体）；提问后回答**逐段出现**，完成后显示本轮命中的技能名与按 `[1]`、`[2]` 排列的出处（材料标题、切片序号、字符区间、摘录），点开出处可查看对应材料详情。与知识问答不同，助手会话**保存历史**（重开会话可见此前各轮问答与出处），且**检索落空也会调用模型作答**（此时无出处，回答中的 `[n]` 标注会被服务端剥掉）。同一会话同一时间只能生成一条回答，生成中重复提交会收到 409 文案；回答中断（生成失败或连接断开）时已显示的文字保留并提示。
+- **智能体管理**（`/admin/agents`，教师）：新建 / 编辑智能体的名称、提示词、启用状态，并勾选绑定的技能与材料；保存同名时显示服务端 400 文案。
+- **技能管理**（`/admin/skills`，教师）：粘贴或选择技能文件创建技能、编辑启用状态、删除（有确认）；文件不合规时页面原样显示服务端的错误原文（含行号或字段名）。
 
 ### 用 curl 调接口
 
@@ -105,6 +113,62 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" $API/api/logout
 - **不再使用 `curl -c/-b` Cookie jar**：token 放在 query、Cookie 或请求体里都会被忽略，只有 `Authorization` 头有效。
 - `JWT_TTL` 可选，默认 `24h`；到期后需重新登录（不做刷新令牌）。重新登录不会踢掉旧 token，旧 token 到自己过期或被登出吊销为止一直有效。
 
+### 助手接口一览
+
+新增的智能体 / 技能 / 会话接口都要求 `Authorization`，班级与身份只取自 token（请求里带 `class_id` / `role` / `user_id` 一律被忽略）：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/agents`、`POST /api/agents`、`PUT /api/agents/{id}` | 教师维护智能体（名称、提示词、启用状态、绑定的技能与材料）；学生的 `GET` 只返回已启用项且每项只有 `id`、`name`，写操作 403 |
+| `GET /api/skills`、`POST /api/skills`、`PUT /api/skills/{id}`、`DELETE /api/skills/{id}` | 教师维护技能（提交 `{"source": 技能原文}`，格式见下一节）；学生的 `GET` 只返回已启用项且不含 `source_text`，写操作 403 |
+| `GET /api/conversations`、`POST /api/conversations` | 本人会话列表 / 新建会话（请求体 `{"agent_id": N}`，标题为「新的提问」） |
+| `GET /api/conversations/{id}` | 会话详情：会话字段加 `messages`（按时间顺序，助手消息带 `citations` 与 `skill_name`） |
+| `POST /api/conversations/{id}/stream` | 流式提问（请求体 `{"question": "..."}`，2–500 字）：SSE 依次返回 `meta`、多个 `delta`、`done`，失败发 `error`；生成中再次提交同一会话返回 409 |
+
+他人 / 他班 / 未启用 / 不存在的对象统一 404；技能文件不合法 400（错误含行号或字段名）。试调：
+
+```bash
+# 教师创建技能（技能文件格式见下一节）
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "$(python3 -c 'import json;print(json.dumps({"source":open("physics-skill.txt").read()}))')" \
+  $API/api/skills
+# → 201 {"id":3}
+
+# 新建会话（agent_id 用已启用智能体的编号，可从 GET /api/agents 获知）
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"agent_id":1}' $API/api/conversations
+# → 201 {"id":5,"agent_id":1,"title":"新的提问","created_at":"...","updated_at":"..."}
+
+# 流式提问（-N 关闭 curl 缓冲；meta 含本轮出处，delta 为逐段文字）
+curl -N -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"question":"这道方程怎么解？"}' $API/api/conversations/5/stream
+```
+
+### 技能文件格式
+
+技能是单个纯文本文件（总长 ≤ 8000 字符）：先写「字段：值」行（全角、半角冒号均可；`#` 开头的整行忽略），空行之后是说明正文（≤ 2000 字符，`#` 与空行原样保留）。
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| 名称 | 是 | ≤ 32 字，班内唯一 |
+| 适用条件 | 是 | ≤ 120 字，按中英文逗号、顿号、分号、竖线分词；提问命中词的个数就是得分，得分最高（同分取编号较小）的技能被选中，至多一个 |
+| 资料 | 否 | ≤ 32 字；填写后本轮引用只保留标题包含该词的材料 |
+| 工具 | 否 | 只能填 `knowledge_search`；只做校验与展示，不会作为工具提供给模型 |
+| 启用 | 是 | 「是」或「否」；停用后不再参与路由 |
+
+示例（保存为 `physics-skill.txt`，可直接用上面的 curl 创建）：
+
+```text
+# 物理技能
+名称：物理实验引导
+适用条件：物理，实验、受力；physics
+资料：物理
+工具：knowledge_search
+启用：是
+
+先让学生画出受力分析图并说出判断依据，再逐步追问；不直接给出最终答案。
+```
+
 ### 切分策略
 
 上传（multipart 字段）与重建（JSON 字段，名字相同）都接受以下参数，缺省为 `auto`：
@@ -127,16 +191,20 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" $API/api/logout
 | student_a1 | 学生 | A 班 | 来自 `.env` 的 `SEED_STUDENT_A1_PASSWORD` |
 | student_b1 | 学生 | B 班 | 来自 `.env` 的 `SEED_STUDENT_B1_PASSWORD` |
 
-首次启动会自动建表，写入以上账号与两班的示例材料（班 B 有两条，其中一条只含 B 班独有内容，用于验证跨班隔离），并为材料生成切片与向量索引；种子与索引过程幂等，重启不会重复插入或覆盖已上传内容。索引依赖不可用时种子照常完成，预置切片标记为 `failed`，重建即可恢复。
+首次启动会自动建表，写入以上账号与两班的示例材料（班 B 有两条，其中一条只含 B 班独有内容，用于验证跨班隔离），并为材料生成切片与向量索引；种子与索引过程幂等，重启不会重复插入或覆盖已上传内容。索引依赖不可用时种子照常完成，预置切片标记为 `failed`，重建即可恢复。除账号与材料外，种子还会为 A 班写入两份预置技能（「数学解题引导」「语文解题引导」）与每班一个已启用的默认智能体；A 班默认智能体绑定这两份技能与首次种子时已有的 A 班材料。技能与智能体的种子同样按 `seed_key` 幂等，改名或改提示词后重启不会被覆盖。
 
 ## 已知行为与限制
 
 - **token 存放在 `sessionStorage`**：前端能读到 token 才能把它放进 `Authorization` 头，这是 Bearer 方案的固有代价——页面一旦出现 XSS，token 就可能被读走。因此只把 token 存进 `sessionStorage`（关闭标签页即清除，且不跨标签页共享），不存 `localStorage`，不存用户名/角色；服务端再用 `Cache-Control: no-store` 与严格 CSP（`script-src 'self'`，无 `unsafe-inline`/`unsafe-eval`）收敛风险。发现泄露时更换 `JWT_SECRET` 即可让全部 token 失效。
+- **班级与角色每次请求回库读取**：JWT 只含 `sub` 等身份无关信息，角色与班级在每次请求时按 `sub` 从数据库读取——改库里的 `class_id` / `role` 下一次请求即生效，删除用户后其 token 立即 401。
 - **从迭代 1 升级需重新登录**：旧的会话 Cookie 不再被接受（`sessions` 表保留但已不再读写），`SESSION_SECRET`/`SESSION_TTL` 由 `JWT_SECRET`/`JWT_TTL` 取代。
-- **跨班访问**：材料相关接口（列表 / 详情 / 下载 / 重建）对不存在的 ID 与他班 ID 返回相同的 404；检索与问答对他班内容返回 200 空结果（`message` 为「资料中未找到相关内容」，`hits`/`citations` 为空），不区分"不存在"与"不属于你"。
+- **升级到本版本后需重新登录**：JWT 载荷精简为 `sub`/`jti`/`iat`/`exp`/`iss`，旧格式 token（含 `role`/`class_id` 等）一律 401，前端会清除后回到登录页，不做兼容。
+- **跨班访问**：材料相关接口（列表 / 详情 / 下载 / 重建）对不存在的 ID 与他班 ID 返回相同的 404；智能体 / 技能 / 会话同样如此（他班、他人、未启用或不存在的对象返回相同的 404）；检索与问答对他班内容返回 200 空结果（`message` 为「资料中未找到相关内容」，`hits`/`citations` 为空），不区分"不存在"与"不属于你"。
 - **检索依赖的降级**：Qdrant 或嵌入网关不可用时 `keyword` 检索仍可用（只查 MySQL 全文索引），`vector`、`hybrid` 与 `/api/ask` 返回 **503**；对话网关不可用时 `/api/ask` 返回 503。错误响应不暴露依赖地址与密钥。
+- **助手的作答与降级**：会话提问经 `POST /api/conversations/{id}/stream`（SSE）逐段返回；Qdrant / 嵌入网关 / 对话网关不可用都在流开始前返回 503 且不落助手消息；检索落空时助手仍会调用模型（与 `/api/ask` 的「无依据不调用」口径不同），超出本轮出处范围的 `[n]` 标注会在推送前被剥掉。
+- **技能路由至多命中一个**：把「适用条件」按标点分词后与提问逐词匹配，命中最多者胜出（同分取编号较小），全部零分则不命中；停用或从智能体解绑后立即不再命中；技能的「工具」字段只做校验与展示，不会作为工具提供给模型。
 - **更换嵌入模型需删集合并重建**：向量与模型绑定，`EMBEDDING_DIM` 必须与集合一致。更换模型或维度后旧向量与新向量不可比——需删除 Qdrant 集合（或数据卷）并对材料逐个重建索引；维度不符时 api 按依赖不可用处理（`vector`/`hybrid` 503，日志写明维度不符），`keyword` 不受影响。集合在首次索引时自动创建。
 - **单实例部署**：当前只支持单个 api/db 实例（登录限流计数在内存中，重启会清零），不做多副本、公网证书与 CI/CD，详见 `openspec/changes/add-auth-rbac-class-knowledge/proposal.md` 的 Non-goals。
 - **MySQL 首次启动较慢**：db 容器首次初始化建表可能需要几十秒，此时访问 web 可能短暂看到 502，等待 `docker compose ps` 中 db 变为 `healthy` 后即可正常访问。
 - **修改端口**：如需更换对外端口，在 `.env` 中设置 `WEB_PORT` 后重新 `docker compose up -d` 即可，无需改动 compose 文件。
-- **迭代 2 不做**：重排序（结果只按 RRF 融合）、跨班检索（含教师）、流式输出（`/api/ask` 一次性返回 JSON）、多轮记忆与 Agent、PDF/Word 等新文件类型（仍只支持 `.txt` / `.md`）、检索与问答的前端页面（接口可用，页面已由迭代 3 的 `add-knowledge-qa-ui` 提供）、异步索引队列（上传请求内同步完成索引）。
+- **迭代 2 不做**：重排序（结果只按 RRF 融合）、跨班检索（含教师）、`/api/ask` 的流式输出（保持一次性返回 JSON；逐段输出由助手的 `/api/conversations/{id}/stream` 提供）、多轮记忆与 Agent（已由 `add-tutor-agents-skills-streaming` 的智能体与会话历史提供）、PDF/Word 等新文件类型（仍只支持 `.txt` / `.md`）、检索与问答的前端页面（接口可用，页面已由迭代 3 的 `add-knowledge-qa-ui` 提供）、异步索引队列（上传请求内同步完成索引）。

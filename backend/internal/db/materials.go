@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ListMaterials returns materials for classID only, optionally filtered by a
@@ -41,6 +42,52 @@ func ListMaterials(ctx context.Context, conn *sql.DB, classID int, q string) ([]
 // class-isolation checks MUST treat this identically to a cross-class hit
 // (see design.md Decision 4): both return 404 with the same response body.
 var ErrNotFound = errors.New("not found")
+
+// FilterMaterialIDs returns the subset of ids that are materials of classID,
+// duplicates folded and the input order preserved. The tutor pipeline uses it
+// to intersect an agent's bound materials with the class before any retrieval
+// runs, so a binding that names another class's material yields nothing rather
+// than a leak.
+func FilterMaterialIDs(ctx context.Context, conn *sql.DB, classID int, ids []int) ([]int, error) {
+	deduped := dedupeIDs(ids)
+	if len(deduped) == 0 {
+		return nil, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(deduped)), ",")
+	args := make([]any, 0, len(deduped)+1)
+	args = append(args, classID)
+	for _, id := range deduped {
+		args = append(args, id)
+	}
+
+	rows, err := conn.QueryContext(ctx,
+		`SELECT id FROM materials WHERE class_id = ? AND id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("filter material ids: %w", err)
+	}
+	defer rows.Close()
+
+	found := make(map[int]bool, len(deduped))
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan material id: %w", err)
+		}
+		found[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]int, 0, len(found))
+	for _, id := range deduped {
+		if found[id] {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
 
 // GetMaterialByID fetches a material by id only, with no class filter in the
 // SQL. Callers MUST compare the returned ClassID against the caller's session

@@ -165,7 +165,7 @@ func TestToHitsCapsAndProjects(t *testing.T) {
 	if len(hits) != 1 {
 		t.Fatalf("toHits returned %d hits, want 1", len(hits))
 	}
-	want := Hit{MaterialID: 3, MaterialTitle: "材料一", ChunkID: 7, ChunkIndex: 1, CharStart: 10, CharEnd: 20, Excerpt: "第一段正文", Score: 1.5}
+	want := Hit{MaterialID: 3, MaterialTitle: "材料一", ChunkID: 7, ChunkIndex: 1, CharStart: 10, CharEnd: 20, Excerpt: "第一段正文", Score: 1.5, Text: "第一段正文"}
 	if hits[0] != want {
 		t.Errorf("hits[0] = %+v, want %+v", hits[0], want)
 	}

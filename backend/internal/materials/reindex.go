@@ -35,6 +35,22 @@ type VectorStore interface {
 // replaced. A vector-store failure answers 503 without touching MySQL at all;
 // a failure of the MySQL step leaves the old chunks in place and marks them
 // failed, because their vectors are already gone.
+//
+// @Summary 重建索引
+// @Description 仅教师可用。先删除该材料的旧向量，再按新切分参数替换切片并重新索引；空 body 按 auto。参数不合法 400 且磁盘、数据库、向量库均不被改动。
+// @Tags 材料
+// @Accept json
+// @Produce json
+// @Param id path int true "材料编号"
+// @Param params body map[string]interface{} false "切分参数对象：strategy、chunk_size、overlap_percent、remove_url、remove_email、collapse_whitespace"
+// @Success 200 {object} map[string]interface{} "id、title、index_status、chunk_count、chunk_strategy"
+// @Failure 400 {object} httpapi.errorBody "切分参数不合法"
+// @Failure 401 {object} httpapi.errorBody "未登录或会话已失效"
+// @Failure 403 {object} httpapi.errorBody "学生无权重建"
+// @Failure 404 {object} httpapi.errorBody "记录不存在（含他班）"
+// @Failure 503 {object} httpapi.errorBody "服务暂不可用"
+// @Security BearerAuth
+// @Router /api/materials/{id}/reindex [post]
 func (h *Handlers) Reindex(w http.ResponseWriter, r *http.Request) {
 	su := httpapi.SessionUserFromContext(r.Context())
 

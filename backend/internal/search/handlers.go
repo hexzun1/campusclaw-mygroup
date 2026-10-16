@@ -27,13 +27,26 @@ type searchResponse struct {
 	Mode    Mode   `json:"mode"`
 	Hits    []Hit  `json:"hits"`
 	Message string `json:"message,omitempty"`
-}
+} // @name SearchResponse
 
 // Search implements POST /api/search: it validates the request and answers with
 // the traceable hits of the caller's class.
 //
 // The class scope is the session's alone; a class_id in the query string,
 // headers or body is ignored (spec: 检索的权限与班级范围).
+//
+// @Summary 知识检索
+// @Description 三种模式：keyword（MySQL 全文，依赖最少）、vector（向量近邻）、hybrid（两路融合，缺省）。班级范围只取自 token。没有命中时仍是 200，附带 message 提示。
+// @Tags 检索
+// @Accept json
+// @Produce json
+// @Param request body wireRequest true "检索请求"
+// @Success 200 {object} searchResponse "mode、hits、message"
+// @Failure 400 {object} httpapi.errorBody "检索词为空或超长，或模式、条数不合法"
+// @Failure 401 {object} httpapi.errorBody "未登录或会话已失效"
+// @Failure 503 {object} httpapi.errorBody "检索依赖不可用（vector / hybrid 需要嵌入网关与 Qdrant）"
+// @Security BearerAuth
+// @Router /api/search [post]
 func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	su := httpapi.SessionUserFromContext(r.Context())
 

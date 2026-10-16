@@ -6,12 +6,14 @@
 //   - POST /embeddings        hashes rune bigrams into EMBEDDING_DIM dimensions
 //     and normalizes, so overlapping wording yields a high cosine while
 //     unrelated text stays near zero.
-//   - POST /chat/completions  echoes the material numbers it received as [n].
+//   - POST /chat/completions  echoes the material numbers it received as [n];
+//     with stream:true it sends the same text back as SSE pieces.
 //   - GET  /stats             reports per-endpoint call counts and the most
 //     recent request bodies, so "the model was not called" is
 //     assertable.
-//   - POST /control           toggles embedding failure, chat failure and an
-//     out-of-range [9] citation.
+//   - POST /control           toggles embedding failure, chat failure, an
+//     out-of-range [9] citation, a pre-stream failure, a mid-stream abort and
+//     an exact answer text.
 //
 // It is never built into the production image (docker-compose.yml builds only
 // ./cmd/server) and carries no credentials.
@@ -32,9 +34,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const maxBodyBytes = 1 << 20
+
+// Stream piece size and pace: small enough that a testable answer arrives as
+// several SSE frames, slow enough that "arrived piecewise" is observable.
+const (
+	streamPieceRunes = 3
+	streamPiecePause = 20 * time.Millisecond
+)
 
 func main() {
 	addr := flag.String("addr", envString("STUB_ADDR", ":8090"), "listen address")
@@ -45,7 +55,7 @@ func main() {
 		log.Fatalf("invalid -dim %d: must be positive", *dim)
 	}
 
-	s := &state{dim: *dim}
+	s := &state{dim: *dim, abortAfterDeltas: -1}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /embeddings", s.handleEmbeddings)
@@ -115,6 +125,14 @@ type state struct {
 	embedFail          bool
 	chatFail           bool
 	outOfRangeCitation bool
+
+	// Streaming switches (design.md Decision 8): failBeforeFirstDelta answers
+	// the stream request with a plain 500 before any SSE frame;
+	// abortAfterDeltas >= 0 sends that many pieces and then aborts the
+	// connection; chatText, when non-empty, replaces the echoed answer text.
+	failBeforeFirstDelta bool
+	abortAfterDeltas     int
+	chatText             string
 }
 
 type embeddingRequest struct {
@@ -214,10 +232,18 @@ func (s *state) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.lastChatRequest = append(json.RawMessage(nil), body...)
 	fail := s.chatFail
 	outOfRange := s.outOfRangeCitation
+	failBeforeFirst := s.failBeforeFirstDelta
+	abortAfter := s.abortAfterDeltas
+	chatText := s.chatText
 	s.mu.Unlock()
 
 	if fail {
 		writeError(w, http.StatusInternalServerError, "stubgateway: chat failure is toggled on")
+		return
+	}
+
+	if req.Stream {
+		s.streamChat(w, &req, outOfRange, failBeforeFirst, abortAfter, chatText)
 		return
 	}
 
@@ -227,11 +253,92 @@ func (s *state) handleChat(w http.ResponseWriter, r *http.Request) {
 		"model":  req.Model,
 		"choices": []map[string]any{{
 			"index":         0,
-			"message":       chatMessage{Role: "assistant", Content: draftAnswer(&req, outOfRange)},
+			"message":       chatMessage{Role: "assistant", Content: answerText(&req, outOfRange, chatText)},
 			"finish_reason": "stop",
 		}},
 		"usage": map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
 	})
+}
+
+// answerText is the answer the stub produces: the exact text when the control
+// switch sets one, the material echo otherwise.
+func answerText(req *chatRequest, outOfRange bool, chatText string) string {
+	if chatText != "" {
+		return chatText
+	}
+	return draftAnswer(req, outOfRange)
+}
+
+// streamChat answers with the same text as SSE frames of streamPieceRunes
+// runes each. The header is written and flushed before the first piece, so a
+// slow or aborted stream is distinguishable from a pre-stream failure; an
+// abort panics with http.ErrAbortHandler, which drops the connection without a
+// response trailer — exactly the "upstream died mid-stream" shape the server
+// must handle.
+func (s *state) streamChat(w http.ResponseWriter, req *chatRequest, outOfRange, failBeforeFirst bool, abortAfter int, chatText string) {
+	if failBeforeFirst {
+		writeError(w, http.StatusInternalServerError, "stubgateway: chat failure is toggled on")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "stubgateway: streaming is unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	pieces := splitRunes(answerText(req, outOfRange, chatText), streamPieceRunes)
+	for i, piece := range pieces {
+		if abortAfter >= 0 && i >= abortAfter {
+			panic(http.ErrAbortHandler)
+		}
+		if err := writeChatChunk(w, req.Model, piece); err != nil {
+			return
+		}
+		flusher.Flush()
+		time.Sleep(streamPiecePause)
+	}
+
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+func writeChatChunk(w io.Writer, model, piece string) error {
+	chunk := map[string]any{
+		"id":     "stub-chat-completion",
+		"object": "chat.completion.chunk",
+		"model":  model,
+		"choices": []map[string]any{{
+			"index":         0,
+			"delta":         map[string]string{"content": piece},
+			"finish_reason": nil,
+		}},
+	}
+	encoded, err := json.Marshal(chunk)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "data: %s\n\n", encoded)
+	return err
+}
+
+// splitRunes cuts text into consecutive pieces of at most n runes.
+func splitRunes(text string, n int) []string {
+	runes := []rune(text)
+	var pieces []string
+	for start := 0; start < len(runes); start += n {
+		end := start + n
+		if end > len(runes) {
+			end = len(runes)
+		}
+		pieces = append(pieces, string(runes[start:end]))
+	}
+	return pieces
 }
 
 var citationPattern = regexp.MustCompile(`\[(\d+)\]`)
@@ -284,6 +391,9 @@ type statsResponse struct {
 	EmbedFail            bool            `json:"embed_fail"`
 	ChatFail             bool            `json:"chat_fail"`
 	OutOfRangeCitation   bool            `json:"out_of_range_citation"`
+	FailBeforeFirstDelta bool            `json:"fail_before_first_delta"`
+	AbortAfterDeltas     int             `json:"abort_after_deltas"`
+	ChatText             string          `json:"chat_text"`
 }
 
 func (s *state) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -297,6 +407,9 @@ func (s *state) handleStats(w http.ResponseWriter, r *http.Request) {
 		EmbedFail:            s.embedFail,
 		ChatFail:             s.chatFail,
 		OutOfRangeCitation:   s.outOfRangeCitation,
+		FailBeforeFirstDelta: s.failBeforeFirstDelta,
+		AbortAfterDeltas:     s.abortAfterDeltas,
+		ChatText:             s.chatText,
 	}
 	s.mu.Unlock()
 
@@ -304,11 +417,15 @@ func (s *state) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // controlRequest uses pointers so a caller can flip one switch without
-// resetting the others.
+// resetting the others. abort_after_deltas: -1 turns the abort off, 0 or more
+// aborts after that many pieces.
 type controlRequest struct {
-	EmbedFail          *bool `json:"embed_fail"`
-	ChatFail           *bool `json:"chat_fail"`
-	OutOfRangeCitation *bool `json:"out_of_range_citation"`
+	EmbedFail            *bool   `json:"embed_fail"`
+	ChatFail             *bool   `json:"chat_fail"`
+	OutOfRangeCitation   *bool   `json:"out_of_range_citation"`
+	FailBeforeFirstDelta *bool   `json:"fail_before_first_delta"`
+	AbortAfterDeltas     *int    `json:"abort_after_deltas"`
+	ChatText             *string `json:"chat_text"`
 }
 
 func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
@@ -334,10 +451,22 @@ func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
 	if req.OutOfRangeCitation != nil {
 		s.outOfRangeCitation = *req.OutOfRangeCitation
 	}
-	resp := map[string]bool{
-		"embed_fail":            s.embedFail,
-		"chat_fail":             s.chatFail,
-		"out_of_range_citation": s.outOfRangeCitation,
+	if req.FailBeforeFirstDelta != nil {
+		s.failBeforeFirstDelta = *req.FailBeforeFirstDelta
+	}
+	if req.AbortAfterDeltas != nil {
+		s.abortAfterDeltas = *req.AbortAfterDeltas
+	}
+	if req.ChatText != nil {
+		s.chatText = *req.ChatText
+	}
+	resp := map[string]any{
+		"embed_fail":              s.embedFail,
+		"chat_fail":               s.chatFail,
+		"out_of_range_citation":   s.outOfRangeCitation,
+		"fail_before_first_delta": s.failBeforeFirstDelta,
+		"abort_after_deltas":      s.abortAfterDeltas,
+		"chat_text":               s.chatText,
 	}
 	s.mu.Unlock()
 

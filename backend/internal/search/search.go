@@ -38,7 +38,7 @@ const (
 )
 
 // Mode selects how search candidates are resolved.
-type Mode string
+type Mode string // @name SearchMode
 
 const (
 	// ModeKeyword searches the MySQL full-text index only and never touches the
@@ -72,7 +72,7 @@ type wireRequest struct {
 	Query string `json:"query"`
 	Mode  string `json:"mode"`
 	TopK  *int   `json:"top_k"`
-}
+} // @name SearchRequest
 
 // ParseRequest decodes and validates a request body. Every error it returns
 // describes a client mistake and maps to 400.
@@ -115,6 +115,8 @@ type Embedder interface {
 // VectorStore is the slice of the vector store the vector branch needs.
 type VectorStore interface {
 	Search(ctx context.Context, classID int, vector []float64, limit int) ([]vector.ScoredPoint, error)
+	// SearchInMaterials is Search restricted to the given material ids.
+	SearchInMaterials(ctx context.Context, classID int, materialIDs []int, vector []float64, limit int) ([]vector.ScoredPoint, error)
 }
 
 // Engine resolves queries for one class. It is the shared core of the search
@@ -141,6 +143,36 @@ func (e *Engine) Search(ctx context.Context, classID int, req Request) ([]Hit, e
 		return e.vector(ctx, classID, req)
 	}
 	return e.hybrid(ctx, classID, req)
+}
+
+// HybridInMaterials resolves a hybrid query restricted to the given materials
+// of classID (design.md Decision 5): the tutor pipeline may only retrieve
+// inside the locked agent's bindings.
+//
+// The set is first intersected with the class's own materials; an empty
+// intersection answers with no results without ever calling the embedding
+// gateway or the vector store. Both branches then carry the material
+// restriction — the keyword SQL filters on material ids, the vector search
+// adds a material-id payload filter next to the class one — and the back-read
+// still re-checks the class.
+func (e *Engine) HybridInMaterials(ctx context.Context, classID int, materialIDs []int, query string, topK int) ([]Hit, error) {
+	ids, err := db.FilterMaterialIDs(ctx, e.conn, classID, materialIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return []Hit{}, nil
+	}
+
+	keywordRows, err := db.SearchChunksByKeywordInMaterials(ctx, e.conn, classID, ids, query, db.KeywordLimit)
+	if err != nil {
+		return nil, err
+	}
+	vectorRows, err := e.vectorCandidatesInMaterials(ctx, classID, ids, query)
+	if err != nil {
+		return nil, err
+	}
+	return toHits(fuseRRF(keywordRows, vectorRows), topK), nil
 }
 
 // keyword resolves the keyword mode: the MySQL full-text branch, capped at the
@@ -189,6 +221,29 @@ func (e *Engine) vectorCandidates(ctx context.Context, classID int, query string
 	if err != nil {
 		return nil, err
 	}
+	return e.backReadPoints(ctx, classID, points)
+}
+
+// vectorCandidatesInMaterials is the vector branch of HybridInMaterials: the
+// material restriction rides in the vector store's payload filter.
+func (e *Engine) vectorCandidatesInMaterials(ctx context.Context, classID int, materialIDs []int, query string) ([]db.ChunkHit, error) {
+	queryVector, err := e.embedder.EmbedOne(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	points, err := e.vectors.SearchInMaterials(ctx, classID, materialIDs, queryVector, vector.SearchLimit)
+	if err != nil {
+		return nil, err
+	}
+	return e.backReadPoints(ctx, classID, points)
+}
+
+// backReadPoints re-reads the vector store's points from MySQL with the class
+// filter applied a second time, keeping the vector store's ordering and
+// scores. A point whose chunk no longer exists — or no longer belongs to the
+// class — is dropped rather than returned.
+func (e *Engine) backReadPoints(ctx context.Context, classID int, points []vector.ScoredPoint) ([]db.ChunkHit, error) {
 	if len(points) == 0 {
 		return nil, nil
 	}
@@ -292,7 +347,11 @@ type Hit struct {
 	CharEnd       int     `json:"char_end"`
 	Excerpt       string  `json:"excerpt"`
 	Score         float64 `json:"score"`
-}
+	// Text is the full chunk body. The tutor pipeline keeps it server-side to
+	// build the gateway message with more than an excerpt; it is never
+	// serialized, so the search response shape is unchanged.
+	Text string `json:"-"`
+} // @name SearchHit
 
 // toHits projects database rows into the response shape, capped at topK. The
 // result is never nil, so it always marshals as a JSON array.
@@ -318,6 +377,7 @@ func toHit(c db.ChunkHit) Hit {
 		CharEnd:       c.CharEnd,
 		Excerpt:       Excerpt(c.ChunkText),
 		Score:         c.Score,
+		Text:          c.ChunkText,
 	}
 }
 

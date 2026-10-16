@@ -1,6 +1,7 @@
 // Package seed idempotently creates the sample classes, accounts and
-// materials described in design.md Decision 6, so the app is usable right
-// after `docker compose up --build` without manual setup.
+// materials described in design.md Decision 6 (materials) and Decision 11
+// (tutor data), so the app is usable right after `docker compose up --build`
+// without manual setup.
 package seed
 
 import (
@@ -80,6 +81,10 @@ func Run(ctx context.Context, conn *sql.DB, cfg Config) error {
 	}
 	if err := ensureMaterial(ctx, conn, cfg.UploadDir, classB.ID, materialB2Title, materialB2Body, studentB1.ID); err != nil {
 		return fmt.Errorf("ensure material B2: %w", err)
+	}
+
+	if err := ensureTutorData(ctx, conn, classA.ID, classB.ID); err != nil {
+		return fmt.Errorf("ensure tutor data: %w", err)
 	}
 
 	return nil

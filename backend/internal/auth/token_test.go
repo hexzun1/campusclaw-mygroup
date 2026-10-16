@@ -33,10 +33,10 @@ func splitToken(t *testing.T, token string) []string {
 	return parts
 }
 
-func TestIssuePayloadShape(t *testing.T) {
+func TestIssuePayloadIsExactlyTheFiveClaims(t *testing.T) {
 	issuer := NewTokenIssuer(strings.Repeat("k", 32), 24*time.Hour)
 
-	token, err := issuer.Issue(7, "teacher_a", "teacher", 1)
+	token, err := issuer.Issue(7)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -53,19 +53,16 @@ func TestIssuePayloadShape(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	want := []string{"class_id", "exp", "iat", "iss", "jti", "role", "user_id", "username"}
+	want := []string{"exp", "iat", "iss", "jti", "sub"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("payload keys = %v, want exactly %v", got, want)
 	}
 
+	if payload["sub"] != "7" {
+		t.Errorf("sub = %v, want the decimal string \"7\"", payload["sub"])
+	}
 	if payload["iss"] != Issuer {
 		t.Errorf("iss = %v, want %s", payload["iss"], Issuer)
-	}
-	if payload["user_id"] != float64(7) || payload["class_id"] != float64(1) {
-		t.Errorf("user_id/class_id = %v/%v, want 7/1", payload["user_id"], payload["class_id"])
-	}
-	if payload["username"] != "teacher_a" || payload["role"] != "teacher" {
-		t.Errorf("username/role = %v/%v, want teacher_a/teacher", payload["username"], payload["role"])
 	}
 
 	iat, exp := payload["iat"].(float64), payload["exp"].(float64)
@@ -84,11 +81,11 @@ func TestIssueUsesInjectedClockAndUniqueJTI(t *testing.T) {
 	fixed := time.Date(2030, 5, 6, 7, 8, 9, 0, time.UTC)
 	issuer.now = func() time.Time { return fixed }
 
-	first, err := issuer.Issue(1, "student_a1", "student", 1)
+	first, err := issuer.Issue(1)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	second, err := issuer.Issue(1, "student_a1", "student", 1)
+	second, err := issuer.Issue(1)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -110,7 +107,7 @@ func TestIssueUsesInjectedClockAndUniqueJTI(t *testing.T) {
 func TestIssuePayloadHasNoCredentialMaterial(t *testing.T) {
 	issuer := NewTokenIssuer(strings.Repeat("k", 32), time.Hour)
 
-	token, err := issuer.Issue(1, "teacher_a", "teacher", 1)
+	token, err := issuer.Issue(1)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}

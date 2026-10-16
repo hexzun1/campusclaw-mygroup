@@ -1,0 +1,1511 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "面向中小学的教研智能体后端接口：认证、教学材料、检索、问答、智能体、技能与会话。\n除 POST /api/login 外，所有接口都需要 `Authorization: Bearer \u003ctoken\u003e`。\n班级与角色只取自 token：请求中的 class_id / role / user_id 一律被忽略。",
+        "title": "CampusClaw API",
+        "contact": {},
+        "version": "1.0"
+    },
+    "basePath": "/",
+    "paths": {
+        "/api/agents": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "教师看到本班全部智能体（含提示词、启用状态与绑定编号）；学生只看到已启用的智能体，且响应中只有 id 与 name。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "智能体"
+                ],
+                "summary": "智能体列表",
+                "responses": {
+                    "200": {
+                        "description": "教师：id、name、prompt、enabled、skill_ids、material_ids；学生：id、name",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "仅教师可用。skill_ids / material_ids 必须属于本班，否则 404；名称重复 400。省去的绑定数组视为空数组。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "智能体"
+                ],
+                "summary": "新建智能体",
+                "parameters": [
+                    {
+                        "description": "智能体定义",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/AgentRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "新智能体的 id",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "integer"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "名称或提示词不合法、名称重复",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "学生无权操作",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "绑定的技能或材料不存在（含他班）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/agents/{id}": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "仅教师可用，整体替换。他班与不存在的编号是同一个 404（先于读取请求体判断）。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "智能体"
+                ],
+                "summary": "更新智能体",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "智能体编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "智能体定义",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/AgentRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "被更新的 id",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "integer"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "名称或提示词不合法、名称重复",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "学生无权操作",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "智能体或绑定对象不存在（含他班）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/ask": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "一次性返回完整回答与出处（不流式）。没有命中时不调用对话网关：answer 为「资料中未找到相关内容」、citations 为空。messages 只保留 user / assistant 角色，system 一律丢弃。回答中的 [n] 对应 citations[n-1]。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "问答"
+                ],
+                "summary": "带引用的问答",
+                "parameters": [
+                    {
+                        "description": "问题与可选历史",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/AskRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "answer、citations",
+                        "schema": {
+                            "$ref": "#/definitions/AskResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "问题为空或超长、请求格式错误",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "检索或对话依赖不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/conversations": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "只返回调用者本人在本班的会话，最近更新的在前。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "会话"
+                ],
+                "summary": "会话列表",
+                "responses": {
+                    "200": {
+                        "description": "id、agent_id、title、created_at、updated_at",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/Conversation"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "指定一个本班已启用的智能体，会话从此锁定它。本班没有已启用智能体时 400；智能体停用、他班或不存在时为同一个 404。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "会话"
+                ],
+                "summary": "新建会话",
+                "parameters": [
+                    {
+                        "description": "agent_id",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/CreateConversationRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "id、agent_id、title、created_at、updated_at",
+                        "schema": {
+                            "$ref": "#/definitions/Conversation"
+                        }
+                    },
+                    "400": {
+                        "description": "缺少 agent_id，或本班暂无已启用的智能体",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "智能体不存在（含他班、停用）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/conversations/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "返回会话与按时间排序的全部消息；assistant 消息带 citations（与正文中的 [n] 对应）与 skill_name。他人、他班或不存在的会话都是同一个 404。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "会话"
+                ],
+                "summary": "会话详情",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "会话编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "会话字段 + messages",
+                        "schema": {
+                            "$ref": "#/definitions/ConversationDetail"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "会话不存在（含他人、他班）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/conversations/{id}/stream": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "以 SSE 返回一次作答。事件序列：meta（status、skill 与 citations）→ delta…（正文增量，拼接后即整段正文）→ done（message_id）；中途失败时在已推送部分之后给出 error。第一段正文之前的一切失败都是普通 JSON 错误。同一会话同时只允许一次生成，并发提问得到 409。响应头为 text/event-stream、Cache-Control: no-cache。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "会话"
+                ],
+                "summary": "流式提问",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "会话编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "问题（2–500 字）",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/StreamQuestionRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "SSE 事件流：meta / delta / done / error",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "问题为空、过短或过长",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "会话不存在（含他人、他班）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "409": {
+                        "description": "回答正在生成，请稍后重试",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "检索或对话依赖不可用；生成中断且未产生任何正文时也是 503",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/login": {
+            "post": {
+                "description": "用用户名与密码换取 Bearer token；响应中的 token 用于后续请求的 Authorization 头。无需认证。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "认证"
+                ],
+                "summary": "登录",
+                "parameters": [
+                    {
+                        "description": "用户名与密码",
+                        "name": "credentials",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/LoginRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "token、username、role",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "请求格式错误",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "用户名或密码错误（含连续失败后的限流）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/logout": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "吊销本次请求所用的这一个 token；同一用户的其他 token 不受影响。token 无效或已吊销时是 401。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "认证"
+                ],
+                "summary": "登出",
+                "responses": {
+                    "200": {
+                        "description": "ok 恒为 true",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "boolean"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/materials": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "返回本班材料（可按标题关键字过滤）；班级范围只取自 token，请求里的 class_id 一律被忽略。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "材料"
+                ],
+                "summary": "材料列表",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "标题关键字",
+                        "name": "q",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "id、title、class_id、created_at",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "仅教师可用。上传 .txt / .md（UTF-8），同步完成入库与向量索引；索引失败不回滚材料，切片标记 failed，可用重建恢复。切分参数不合法时不留下任何文件或记录。",
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "材料"
+                ],
+                "summary": "上传材料",
+                "parameters": [
+                    {
+                        "type": "file",
+                        "description": "文件（.txt 或 .md，UTF-8，不超过上传上限）",
+                        "name": "file",
+                        "in": "formData",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "标题（缺省为文件名去掉扩展名）",
+                        "name": "title",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "string",
+                        "description": "切分策略：auto（缺省）/ custom / hierarchy",
+                        "name": "strategy",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "custom 的窗口大小（100–2000）",
+                        "name": "chunk_size",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "custom 的重叠百分比（0–50）",
+                        "name": "overlap_percent",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "预处理：移除链接（true/false）",
+                        "name": "remove_url",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "预处理：移除邮箱（true/false）",
+                        "name": "remove_email",
+                        "in": "formData"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "预处理：合并空白（true/false）",
+                        "name": "collapse_whitespace",
+                        "in": "formData"
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "id、title、index_status",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "文件类型、编码、大小或切分参数不合法",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "学生无权上传",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "413": {
+                        "description": "文件超过大小上限",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/materials/{id}": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "返回标题、上传时间、知识条目正文与聚合索引状态；不存在的编号与他班编号都是同一个 404。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "材料"
+                ],
+                "summary": "材料详情",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "材料编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "id、title、class_id、created_at、body、index_status、chunk_count、chunk_strategy",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "记录不存在（含他班）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/materials/{id}/file": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "以附件形式返回上传时的原始文件；不存在的编号与他班编号都是同一个 404。",
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "材料"
+                ],
+                "summary": "下载材料原文",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "材料编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "原始文件",
+                        "schema": {
+                            "type": "file"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "记录不存在（含他班）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/materials/{id}/reindex": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "仅教师可用。先删除该材料的旧向量，再按新切分参数替换切片并重新索引；空 body 按 auto。参数不合法 400 且磁盘、数据库、向量库均不被改动。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "材料"
+                ],
+                "summary": "重建索引",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "材料编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "切分参数对象：strategy、chunk_size、overlap_percent、remove_url、remove_email、collapse_whitespace",
+                        "name": "params",
+                        "in": "body",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "id、title、index_status、chunk_count、chunk_strategy",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "切分参数不合法",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "学生无权重建",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "记录不存在（含他班）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/me": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "返回 token 对应的用户名、角色、班级编号与班级名。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "认证"
+                ],
+                "summary": "当前身份",
+                "responses": {
+                    "200": {
+                        "description": "username、role、class_id、class_name",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/search": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "三种模式：keyword（MySQL 全文，依赖最少）、vector（向量近邻）、hybrid（两路融合，缺省）。班级范围只取自 token。没有命中时仍是 200，附带 message 提示。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "检索"
+                ],
+                "summary": "知识检索",
+                "parameters": [
+                    {
+                        "description": "检索请求",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/SearchRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "mode、hits、message",
+                        "schema": {
+                            "$ref": "#/definitions/SearchResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "检索词为空或超长，或模式、条数不合法",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "检索依赖不可用（vector / hybrid 需要嵌入网关与 Qdrant）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/skills": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "教师看到本班全部技能（含源文件文本）；学生只看到已启用的技能，且响应中没有 source_text。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "技能"
+                ],
+                "summary": "技能列表",
+                "responses": {
+                    "200": {
+                        "description": "教师：id、name、trigger_text、subject_text、tools、description、source_text、enabled；学生：同左但不含 source_text",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "仅教师可用。source 为技能文件全文：多行“字段：值”（名称、适用条件必填；资料、工具、启用可选），空行之后是说明正文。字段解析失败返回 400 并指出行号；启用状态以文件中的“启用”为准。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "技能"
+                ],
+                "summary": "新建技能",
+                "parameters": [
+                    {
+                        "description": "技能文件（source 字段）",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/SkillRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "新技能的 id",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "integer"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "技能文件解析失败、名称重复",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "学生无权操作",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/skills/{id}": {
+            "put": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "仅教师可用，整体替换（文件重新解析）。他班与不存在的编号是同一个 404（先于读取请求体判断）。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "技能"
+                ],
+                "summary": "更新技能",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "技能编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "技能文件（source 字段）",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/SkillRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "被更新的 id",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "integer"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "技能文件解析失败、名称重复",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "学生无权操作",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "技能不存在（含他班）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "仅教师可用。删除技能会同时解除它与智能体的绑定；他班与不存在的编号是同一个 404。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "技能"
+                ],
+                "summary": "删除技能",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "技能编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "ok 恒为 true",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "boolean"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "学生无权操作",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "技能不存在（含他班）",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "AgentRequest": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "material_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                },
+                "prompt": {
+                    "type": "string"
+                },
+                "skill_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                }
+            }
+        },
+        "AskMessage": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                }
+            }
+        },
+        "AskRequest": {
+            "type": "object",
+            "properties": {
+                "messages": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/AskMessage"
+                    }
+                },
+                "question": {
+                    "type": "string"
+                }
+            }
+        },
+        "AskResponse": {
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "string"
+                },
+                "citations": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/SearchHit"
+                    }
+                }
+            }
+        },
+        "Conversation": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "integer"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "title": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "ConversationDetail": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "integer"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "messages": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/TutorMessage"
+                    }
+                },
+                "title": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "CreateConversationRequest": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "integer"
+                }
+            }
+        },
+        "ErrorBody": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                }
+            }
+        },
+        "LoginRequest": {
+            "type": "object",
+            "properties": {
+                "password": {
+                    "type": "string"
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "SearchHit": {
+            "type": "object",
+            "properties": {
+                "char_end": {
+                    "type": "integer"
+                },
+                "char_start": {
+                    "type": "integer"
+                },
+                "chunk_id": {
+                    "type": "integer"
+                },
+                "chunk_index": {
+                    "type": "integer"
+                },
+                "excerpt": {
+                    "type": "string"
+                },
+                "material_id": {
+                    "type": "integer"
+                },
+                "material_title": {
+                    "type": "string"
+                },
+                "score": {
+                    "type": "number"
+                }
+            }
+        },
+        "SearchMode": {
+            "type": "string",
+            "enum": [
+                "keyword",
+                "vector",
+                "hybrid"
+            ],
+            "x-enum-varnames": [
+                "ModeKeyword",
+                "ModeVector",
+                "ModeHybrid"
+            ]
+        },
+        "SearchRequest": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string"
+                },
+                "query": {
+                    "type": "string"
+                },
+                "top_k": {
+                    "type": "integer"
+                }
+            }
+        },
+        "SearchResponse": {
+            "type": "object",
+            "properties": {
+                "hits": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/SearchHit"
+                    }
+                },
+                "message": {
+                    "type": "string"
+                },
+                "mode": {
+                    "$ref": "#/definitions/SearchMode"
+                }
+            }
+        },
+        "SkillRequest": {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string"
+                }
+            }
+        },
+        "StreamQuestionRequest": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string"
+                }
+            }
+        },
+        "TutorMessage": {
+            "type": "object",
+            "properties": {
+                "citations": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "content": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "role": {
+                    "type": "string"
+                },
+                "skill_name": {
+                    "type": "string"
+                }
+            }
+        }
+    },
+    "securityDefinitions": {
+        "BearerAuth": {
+            "description": "填 `Bearer \u003ctoken\u003e`（Bearer 与 token 之间有一个空格），token 来自 POST /api/login 的响应。",
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header"
+        }
+    }
+}

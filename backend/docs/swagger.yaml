@@ -1,0 +1,983 @@
+basePath: /
+definitions:
+  AgentRequest:
+    properties:
+      enabled:
+        type: boolean
+      material_ids:
+        items:
+          type: integer
+        type: array
+      name:
+        type: string
+      prompt:
+        type: string
+      skill_ids:
+        items:
+          type: integer
+        type: array
+    type: object
+  AskMessage:
+    properties:
+      content:
+        type: string
+      role:
+        type: string
+    type: object
+  AskRequest:
+    properties:
+      messages:
+        items:
+          $ref: '#/definitions/AskMessage'
+        type: array
+      question:
+        type: string
+    type: object
+  AskResponse:
+    properties:
+      answer:
+        type: string
+      citations:
+        items:
+          $ref: '#/definitions/SearchHit'
+        type: array
+    type: object
+  Conversation:
+    properties:
+      agent_id:
+        type: integer
+      created_at:
+        type: string
+      id:
+        type: integer
+      title:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  ConversationDetail:
+    properties:
+      agent_id:
+        type: integer
+      created_at:
+        type: string
+      id:
+        type: integer
+      messages:
+        items:
+          $ref: '#/definitions/TutorMessage'
+        type: array
+      title:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  CreateConversationRequest:
+    properties:
+      agent_id:
+        type: integer
+    type: object
+  ErrorBody:
+    properties:
+      error:
+        type: string
+    type: object
+  LoginRequest:
+    properties:
+      password:
+        type: string
+      username:
+        type: string
+    type: object
+  SearchHit:
+    properties:
+      char_end:
+        type: integer
+      char_start:
+        type: integer
+      chunk_id:
+        type: integer
+      chunk_index:
+        type: integer
+      excerpt:
+        type: string
+      material_id:
+        type: integer
+      material_title:
+        type: string
+      score:
+        type: number
+    type: object
+  SearchMode:
+    enum:
+    - keyword
+    - vector
+    - hybrid
+    type: string
+    x-enum-varnames:
+    - ModeKeyword
+    - ModeVector
+    - ModeHybrid
+  SearchRequest:
+    properties:
+      mode:
+        type: string
+      query:
+        type: string
+      top_k:
+        type: integer
+    type: object
+  SearchResponse:
+    properties:
+      hits:
+        items:
+          $ref: '#/definitions/SearchHit'
+        type: array
+      message:
+        type: string
+      mode:
+        $ref: '#/definitions/SearchMode'
+    type: object
+  SkillRequest:
+    properties:
+      source:
+        type: string
+    type: object
+  StreamQuestionRequest:
+    properties:
+      question:
+        type: string
+    type: object
+  TutorMessage:
+    properties:
+      citations:
+        items:
+          type: integer
+        type: array
+      content:
+        type: string
+      created_at:
+        type: string
+      id:
+        type: integer
+      role:
+        type: string
+      skill_name:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: |-
+    面向中小学的教研智能体后端接口：认证、教学材料、检索、问答、智能体、技能与会话。
+    除 POST /api/login 外，所有接口都需要 `Authorization: Bearer <token>`。
+    班级与角色只取自 token：请求中的 class_id / role / user_id 一律被忽略。
+  title: CampusClaw API
+  version: "1.0"
+paths:
+  /api/agents:
+    get:
+      description: 教师看到本班全部智能体（含提示词、启用状态与绑定编号）；学生只看到已启用的智能体，且响应中只有 id 与 name。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 教师：id、name、prompt、enabled、skill_ids、material_ids；学生：id、name
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 智能体列表
+      tags:
+      - 智能体
+    post:
+      consumes:
+      - application/json
+      description: 仅教师可用。skill_ids / material_ids 必须属于本班，否则 404；名称重复 400。省去的绑定数组视为空数组。
+      parameters:
+      - description: 智能体定义
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/AgentRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: 新智能体的 id
+          schema:
+            additionalProperties:
+              type: integer
+            type: object
+        "400":
+          description: 名称或提示词不合法、名称重复
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "403":
+          description: 学生无权操作
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 绑定的技能或材料不存在（含他班）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 新建智能体
+      tags:
+      - 智能体
+  /api/agents/{id}:
+    put:
+      consumes:
+      - application/json
+      description: 仅教师可用，整体替换。他班与不存在的编号是同一个 404（先于读取请求体判断）。
+      parameters:
+      - description: 智能体编号
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 智能体定义
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/AgentRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 被更新的 id
+          schema:
+            additionalProperties:
+              type: integer
+            type: object
+        "400":
+          description: 名称或提示词不合法、名称重复
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "403":
+          description: 学生无权操作
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 智能体或绑定对象不存在（含他班）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 更新智能体
+      tags:
+      - 智能体
+  /api/ask:
+    post:
+      consumes:
+      - application/json
+      description: 一次性返回完整回答与出处（不流式）。没有命中时不调用对话网关：answer 为「资料中未找到相关内容」、citations 为空。messages
+        只保留 user / assistant 角色，system 一律丢弃。回答中的 [n] 对应 citations[n-1]。
+      parameters:
+      - description: 问题与可选历史
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/AskRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: answer、citations
+          schema:
+            $ref: '#/definitions/AskResponse'
+        "400":
+          description: 问题为空或超长、请求格式错误
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 检索或对话依赖不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 带引用的问答
+      tags:
+      - 问答
+  /api/conversations:
+    get:
+      description: 只返回调用者本人在本班的会话，最近更新的在前。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: id、agent_id、title、created_at、updated_at
+          schema:
+            items:
+              $ref: '#/definitions/Conversation'
+            type: array
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 会话列表
+      tags:
+      - 会话
+    post:
+      consumes:
+      - application/json
+      description: 指定一个本班已启用的智能体，会话从此锁定它。本班没有已启用智能体时 400；智能体停用、他班或不存在时为同一个 404。
+      parameters:
+      - description: agent_id
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/CreateConversationRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: id、agent_id、title、created_at、updated_at
+          schema:
+            $ref: '#/definitions/Conversation'
+        "400":
+          description: 缺少 agent_id，或本班暂无已启用的智能体
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 智能体不存在（含他班、停用）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 新建会话
+      tags:
+      - 会话
+  /api/conversations/{id}:
+    get:
+      description: 返回会话与按时间排序的全部消息；assistant 消息带 citations（与正文中的 [n] 对应）与 skill_name。他人、他班或不存在的会话都是同一个
+        404。
+      parameters:
+      - description: 会话编号
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 会话字段 + messages
+          schema:
+            $ref: '#/definitions/ConversationDetail'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 会话不存在（含他人、他班）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 会话详情
+      tags:
+      - 会话
+  /api/conversations/{id}/stream:
+    post:
+      consumes:
+      - application/json
+      description: '以 SSE 返回一次作答。事件序列：meta（status、skill 与 citations）→ delta…（正文增量，拼接后即整段正文）→
+        done（message_id）；中途失败时在已推送部分之后给出 error。第一段正文之前的一切失败都是普通 JSON 错误。同一会话同时只允许一次生成，并发提问得到
+        409。响应头为 text/event-stream、Cache-Control: no-cache。'
+      parameters:
+      - description: 会话编号
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 问题（2–500 字）
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/StreamQuestionRequest'
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: SSE 事件流：meta / delta / done / error
+          schema:
+            type: string
+        "400":
+          description: 问题为空、过短或过长
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 会话不存在（含他人、他班）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "409":
+          description: 回答正在生成，请稍后重试
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 检索或对话依赖不可用；生成中断且未产生任何正文时也是 503
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 流式提问
+      tags:
+      - 会话
+  /api/login:
+    post:
+      consumes:
+      - application/json
+      description: 用用户名与密码换取 Bearer token；响应中的 token 用于后续请求的 Authorization 头。无需认证。
+      parameters:
+      - description: 用户名与密码
+        in: body
+        name: credentials
+        required: true
+        schema:
+          $ref: '#/definitions/LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: token、username、role
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: 请求格式错误
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 用户名或密码错误（含连续失败后的限流）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      summary: 登录
+      tags:
+      - 认证
+  /api/logout:
+    post:
+      description: 吊销本次请求所用的这一个 token；同一用户的其他 token 不受影响。token 无效或已吊销时是 401。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: ok 恒为 true
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 登出
+      tags:
+      - 认证
+  /api/materials:
+    get:
+      description: 返回本班材料（可按标题关键字过滤）；班级范围只取自 token，请求里的 class_id 一律被忽略。
+      parameters:
+      - description: 标题关键字
+        in: query
+        name: q
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: id、title、class_id、created_at
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 材料列表
+      tags:
+      - 材料
+    post:
+      consumes:
+      - multipart/form-data
+      description: 仅教师可用。上传 .txt / .md（UTF-8），同步完成入库与向量索引；索引失败不回滚材料，切片标记 failed，可用重建恢复。切分参数不合法时不留下任何文件或记录。
+      parameters:
+      - description: 文件（.txt 或 .md，UTF-8，不超过上传上限）
+        in: formData
+        name: file
+        required: true
+        type: file
+      - description: 标题（缺省为文件名去掉扩展名）
+        in: formData
+        name: title
+        type: string
+      - description: 切分策略：auto（缺省）/ custom / hierarchy
+        in: formData
+        name: strategy
+        type: string
+      - description: custom 的窗口大小（100–2000）
+        in: formData
+        name: chunk_size
+        type: integer
+      - description: custom 的重叠百分比（0–50）
+        in: formData
+        name: overlap_percent
+        type: integer
+      - description: 预处理：移除链接（true/false）
+        in: formData
+        name: remove_url
+        type: boolean
+      - description: 预处理：移除邮箱（true/false）
+        in: formData
+        name: remove_email
+        type: boolean
+      - description: 预处理：合并空白（true/false）
+        in: formData
+        name: collapse_whitespace
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: id、title、index_status
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: 文件类型、编码、大小或切分参数不合法
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "403":
+          description: 学生无权上传
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "413":
+          description: 文件超过大小上限
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 上传材料
+      tags:
+      - 材料
+  /api/materials/{id}:
+    get:
+      description: 返回标题、上传时间、知识条目正文与聚合索引状态；不存在的编号与他班编号都是同一个 404。
+      parameters:
+      - description: 材料编号
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: id、title、class_id、created_at、body、index_status、chunk_count、chunk_strategy
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 记录不存在（含他班）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 材料详情
+      tags:
+      - 材料
+  /api/materials/{id}/file:
+    get:
+      description: 以附件形式返回上传时的原始文件；不存在的编号与他班编号都是同一个 404。
+      parameters:
+      - description: 材料编号
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/octet-stream
+      responses:
+        "200":
+          description: 原始文件
+          schema:
+            type: file
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 记录不存在（含他班）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 下载材料原文
+      tags:
+      - 材料
+  /api/materials/{id}/reindex:
+    post:
+      consumes:
+      - application/json
+      description: 仅教师可用。先删除该材料的旧向量，再按新切分参数替换切片并重新索引；空 body 按 auto。参数不合法 400 且磁盘、数据库、向量库均不被改动。
+      parameters:
+      - description: 材料编号
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 切分参数对象：strategy、chunk_size、overlap_percent、remove_url、remove_email、collapse_whitespace
+        in: body
+        name: params
+        schema:
+          additionalProperties: true
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: id、title、index_status、chunk_count、chunk_strategy
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: 切分参数不合法
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "403":
+          description: 学生无权重建
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 记录不存在（含他班）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 重建索引
+      tags:
+      - 材料
+  /api/me:
+    get:
+      description: 返回 token 对应的用户名、角色、班级编号与班级名。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: username、role、class_id、class_name
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 当前身份
+      tags:
+      - 认证
+  /api/search:
+    post:
+      consumes:
+      - application/json
+      description: 三种模式：keyword（MySQL 全文，依赖最少）、vector（向量近邻）、hybrid（两路融合，缺省）。班级范围只取自
+        token。没有命中时仍是 200，附带 message 提示。
+      parameters:
+      - description: 检索请求
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/SearchRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: mode、hits、message
+          schema:
+            $ref: '#/definitions/SearchResponse'
+        "400":
+          description: 检索词为空或超长，或模式、条数不合法
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 检索依赖不可用（vector / hybrid 需要嵌入网关与 Qdrant）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 知识检索
+      tags:
+      - 检索
+  /api/skills:
+    get:
+      description: 教师看到本班全部技能（含源文件文本）；学生只看到已启用的技能，且响应中没有 source_text。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 教师：id、name、trigger_text、subject_text、tools、description、source_text、enabled；学生：同左但不含
+            source_text
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 技能列表
+      tags:
+      - 技能
+    post:
+      consumes:
+      - application/json
+      description: 仅教师可用。source 为技能文件全文：多行“字段：值”（名称、适用条件必填；资料、工具、启用可选），空行之后是说明正文。字段解析失败返回
+        400 并指出行号；启用状态以文件中的“启用”为准。
+      parameters:
+      - description: 技能文件（source 字段）
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/SkillRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: 新技能的 id
+          schema:
+            additionalProperties:
+              type: integer
+            type: object
+        "400":
+          description: 技能文件解析失败、名称重复
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "403":
+          description: 学生无权操作
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 新建技能
+      tags:
+      - 技能
+  /api/skills/{id}:
+    delete:
+      description: 仅教师可用。删除技能会同时解除它与智能体的绑定；他班与不存在的编号是同一个 404。
+      parameters:
+      - description: 技能编号
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: ok 恒为 true
+          schema:
+            additionalProperties:
+              type: boolean
+            type: object
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "403":
+          description: 学生无权操作
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 技能不存在（含他班）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 删除技能
+      tags:
+      - 技能
+    put:
+      consumes:
+      - application/json
+      description: 仅教师可用，整体替换（文件重新解析）。他班与不存在的编号是同一个 404（先于读取请求体判断）。
+      parameters:
+      - description: 技能编号
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 技能文件（source 字段）
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/SkillRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 被更新的 id
+          schema:
+            additionalProperties:
+              type: integer
+            type: object
+        "400":
+          description: 技能文件解析失败、名称重复
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "401":
+          description: 未登录或会话已失效
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "403":
+          description: 学生无权操作
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "404":
+          description: 技能不存在（含他班）
+          schema:
+            $ref: '#/definitions/ErrorBody'
+        "503":
+          description: 服务暂不可用
+          schema:
+            $ref: '#/definitions/ErrorBody'
+      security:
+      - BearerAuth: []
+      summary: 更新技能
+      tags:
+      - 技能
+securityDefinitions:
+  BearerAuth:
+    description: 填 `Bearer <token>`（Bearer 与 token 之间有一个空格），token 来自 POST /api/login
+      的响应。
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

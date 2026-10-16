@@ -1,3 +1,13 @@
+// @title CampusClaw API
+// @version 1.0
+// @description 面向中小学的教研智能体后端接口：认证、教学材料、检索、问答、智能体、技能与会话。
+// @description 除 POST /api/login 外，所有接口都需要 `Authorization: Bearer <token>`。
+// @description 班级与角色只取自 token：请求中的 class_id / role / user_id 一律被忽略。
+// @BasePath /
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description 填 `Bearer <token>`（Bearer 与 token 之间有一个空格），token 来自 POST /api/login 的响应。
 package main
 
 import (
@@ -6,6 +16,7 @@ import (
 	"net/http"
 	"os"
 
+	"campusclaw/backend/docs"
 	"campusclaw/backend/internal/ask"
 	"campusclaw/backend/internal/auth"
 	"campusclaw/backend/internal/config"
@@ -15,6 +26,8 @@ import (
 	"campusclaw/backend/internal/index"
 	"campusclaw/backend/internal/materials"
 	"campusclaw/backend/internal/search"
+	"campusclaw/backend/internal/swaggerui"
+	"campusclaw/backend/internal/tutor"
 	"campusclaw/backend/internal/vector"
 	"campusclaw/backend/migrations"
 	"campusclaw/backend/seed"
@@ -93,6 +106,10 @@ func main() {
 	searchEngine := search.New(conn, embeddingClient, vectorClient)
 	searchHandlers := search.NewHandlers(searchEngine)
 	askHandlers := ask.NewHandlers(ask.New(searchEngine, chatClient))
+	tutorHandlers := tutor.NewHandlers(conn, searchEngine, chatClient)
+	teacher := func(h http.HandlerFunc) http.Handler {
+		return requireAuth(auth.RequireTeacher(h))
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +133,23 @@ func main() {
 	apiMux.Handle("POST /api/materials/{id}/reindex", requireAuth(http.HandlerFunc(materialsHandlers.Reindex)))
 	apiMux.Handle("POST /api/search", requireAuth(http.HandlerFunc(searchHandlers.Search)))
 	apiMux.Handle("POST /api/ask", requireAuth(http.HandlerFunc(askHandlers.Ask)))
+	apiMux.Handle("GET /api/agents", requireAuth(http.HandlerFunc(tutorHandlers.ListAgents)))
+	apiMux.Handle("POST /api/agents", teacher(tutorHandlers.CreateAgent))
+	apiMux.Handle("PUT /api/agents/{id}", teacher(tutorHandlers.UpdateAgent))
+	apiMux.Handle("GET /api/skills", requireAuth(http.HandlerFunc(tutorHandlers.ListSkills)))
+	apiMux.Handle("POST /api/skills", teacher(tutorHandlers.CreateSkill))
+	apiMux.Handle("PUT /api/skills/{id}", teacher(tutorHandlers.UpdateSkill))
+	apiMux.Handle("DELETE /api/skills/{id}", teacher(tutorHandlers.DeleteSkill))
+	apiMux.Handle("GET /api/conversations", requireAuth(http.HandlerFunc(tutorHandlers.ListConversations)))
+	apiMux.Handle("POST /api/conversations", requireAuth(http.HandlerFunc(tutorHandlers.CreateConversation)))
+	apiMux.Handle("GET /api/conversations/{id}", requireAuth(http.HandlerFunc(tutorHandlers.DetailConversation)))
+	apiMux.Handle("POST /api/conversations/{id}/stream", requireAuth(http.HandlerFunc(tutorHandlers.StreamConversation)))
+	// API documentation (design.md Decision 9): served before the /api/
+	// subtree, without authentication and deliberately outside NoStore. The
+	// page, its initializer and the spec are served by this binary, so the doc
+	// can never go stale relative to the code.
+	mux.Handle("/swagger/", swaggerui.Handler(docs.SwaggerInfo.ReadDoc))
+
 	mux.Handle("/api/", httpapi.NoStore(apiMux))
 
 	addr := ":" + cfg.APIPort

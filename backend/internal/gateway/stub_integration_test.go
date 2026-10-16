@@ -44,6 +44,13 @@ func stubGatewayDim(t *testing.T) int {
 // setStubControl flips one switch on the stub and restores it afterwards.
 func setStubControl(t *testing.T, baseURL string, body map[string]bool) {
 	t.Helper()
+	setStubControlJSON(t, baseURL, body)
+}
+
+// setStubControlJSON posts an arbitrary control body, for switches whose
+// values are numbers or strings.
+func setStubControlJSON(t *testing.T, baseURL string, body any) {
+	t.Helper()
 	payload, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("encode control body: %v", err)

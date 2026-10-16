@@ -189,6 +189,17 @@ func (c *Client) Upsert(ctx context.Context, points []Point) error {
 // score is below ScoreThreshold. The class filter is applied by the vector
 // store itself, which is the first of the three isolation layers.
 func (c *Client) Search(ctx context.Context, classID int, vector []float64, limit int) ([]ScoredPoint, error) {
+	return c.search(ctx, classID, nil, vector, limit)
+}
+
+// SearchInMaterials is Search additionally restricted to the given material
+// ids, so a caller can retrieve inside a subset of the class (design.md
+// Decision 5: the tutor pipeline queries only the bound materials).
+func (c *Client) SearchInMaterials(ctx context.Context, classID int, materialIDs []int, vector []float64, limit int) ([]ScoredPoint, error) {
+	return c.search(ctx, classID, materialIDs, vector, limit)
+}
+
+func (c *Client) search(ctx context.Context, classID int, materialIDs []int, vector []float64, limit int) ([]ScoredPoint, error) {
 	if len(vector) != c.dim {
 		return nil, upstream.Unavailable(fmt.Sprintf(
 			"the query vector has %d dimensions but EMBEDDING_DIM is %d", len(vector), c.dim), nil)
@@ -200,16 +211,21 @@ func (c *Client) Search(ctx context.Context, classID int, vector []float64, limi
 		return nil, err
 	}
 
+	must := []any{
+		map[string]any{"key": "class_id", "match": map[string]any{"value": classID}},
+	}
+	if len(materialIDs) > 0 {
+		must = append(must, map[string]any{
+			"key": "material_id", "match": map[string]any{"any": materialIDs},
+		})
+	}
+
 	body := map[string]any{
 		"vector":          vector,
 		"limit":           limit,
 		"score_threshold": ScoreThreshold,
 		"with_payload":    true,
-		"filter": map[string]any{
-			"must": []any{
-				map[string]any{"key": "class_id", "match": map[string]any{"value": classID}},
-			},
-		},
+		"filter":          map[string]any{"must": must},
 	}
 
 	var resp searchResponse

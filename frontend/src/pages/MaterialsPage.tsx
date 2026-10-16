@@ -1,9 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import {
   ApiError,
-  downloadMaterialFile,
   getMaterial,
   listMaterials,
   uploadMaterial,
@@ -11,6 +8,7 @@ import {
   type MaterialSummary,
 } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
+import MaterialDetailView from '../components/MaterialDetailView'
 
 export default function MaterialsPage() {
   const { user } = useAuth()
@@ -43,16 +41,6 @@ export default function MaterialsPage() {
       setSelected(detail)
     } catch (err) {
       if (err instanceof ApiError) setLoadError(err.message)
-    }
-  }
-
-  // Downloads must carry the Authorization header, so they go through fetch +
-  // Blob instead of a plain link.
-  async function handleDownload(id: number) {
-    try {
-      await downloadMaterialFile(id)
-    } catch (err) {
-      if (err instanceof ApiError && err.status !== 401) setLoadError(err.message)
     }
   }
 
@@ -115,24 +103,7 @@ export default function MaterialsPage() {
         ))}
       </ul>
 
-      {selected && (
-        <div className="material-detail">
-          <div className="material-detail-header">
-            <h2>{selected.title}</h2>
-            <div>
-              <button type="button" onClick={() => handleDownload(selected.id)}>
-                下载原文件
-              </button>
-              <button type="button" onClick={() => setSelected(null)}>
-                关闭
-              </button>
-            </div>
-          </div>
-          <div className="markdown-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{selected.body}</ReactMarkdown>
-          </div>
-        </div>
-      )}
+      {selected && <MaterialDetailView material={selected} onClose={() => setSelected(null)} />}
     </>
   )
 }
