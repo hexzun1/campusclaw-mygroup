@@ -618,15 +618,35 @@ func DeleteSkill(ctx context.Context, conn *sql.DB, id, classID int) error {
 // serialises against DeleteServerIfUnreferenced and against disconnect, which
 // both lock the server row first (design.md Decision 11).
 //
+// The name is resolved with a snapshot read and the lock is then taken on the
+// primary key. Locking on `(class_id, name)` instead would add an S lock on the
+// unique secondary index before the primary one, while a delete holds the
+// primary X lock and then updates that index — opposite orders, which MySQL
+// resolves with error 1213 under load. Taking only primary-key locks here makes
+// every server writer use one order. The snapshot read may return the id of a
+// row a concurrent delete already removed; the locking read then finds no row,
+// which is exactly ErrSkillServerMissing.
+//
 // Rule ④ (the tool is still in the cache) is deliberately not re-checked here:
 // a reconnect can legitimately shrink the cache, and the tool loop already
 // degrades such a reference at run time.
 func lockSkillServers(ctx context.Context, tx *sql.Tx, classID int, refs []SkillServerRef) error {
 	for _, ref := range refs {
-		var status string
+		var id int
 		err := tx.QueryRowContext(ctx,
-			`SELECT status FROM mcp_servers WHERE class_id = ? AND name = ? FOR SHARE`,
-			classID, ref.Name).Scan(&status)
+			`SELECT id FROM mcp_servers WHERE class_id = ? AND name = ?`,
+			classID, ref.Name).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSkillServerMissing{Name: ref.Name}
+		}
+		if err != nil {
+			return fmt.Errorf("resolve mcp server %q for skill save: %w", ref.Name, err)
+		}
+
+		var status string
+		err = tx.QueryRowContext(ctx,
+			`SELECT status FROM mcp_servers WHERE id = ? AND class_id = ? FOR SHARE`,
+			id, classID).Scan(&status)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrSkillServerMissing{Name: ref.Name}
 		}

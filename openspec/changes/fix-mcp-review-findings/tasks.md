@@ -37,7 +37,7 @@
 
 - [x] 6.1 新增 `db.DeleteServerIfUnreferenced`：一个事务内先 `FOR UPDATE` 锁服务器，再以 `FOR SHARE` 读本班技能，有引用返回技能名，否则删除；`DeleteServer` handler 改用它（design D11）— verify: `go test ./internal/db -run DeleteServerIfUnreferenced` 覆盖"有引用返回名单且未删除"与"无引用删除"；原有 409 与 204 的 apitest 用例（`apitest/cases/api/mcp/servers/_id_/DELETE.py`）仍通过
 - [x] 6.2 `db.CreateSkill`、`db.UpdateSkill` 增加被引用服务器名参数：事务开始后、锁技能行之前，按名称排序以 `FOR SHARE` 复核服务器存在且为 `connected`，失败返回 `ErrSkillServerMissing` 或 `ErrSkillServerNotConnected`；handler 映射为 400，文案与 `validateSkillMCPTools` 一致；`UpdateSkill` 的加锁顺序改为先服务器、后技能（design D11）— verify: `go test ./internal/db -run SkillServerLock` 集成测试：在事务外校验通过后删除服务器，再调用 `CreateSkill`，得 `ErrSkillServerMissing` 且技能未写入；`go test ./internal/tutor -run SkillSave` 断言映射后的文案与事务外校验的「服务器不存在」措辞一致
-- [ ] 6.3 并发互斥 — verify: `go test ./internal/db -run DeleteVsSaveRace -count=20`：每次并发执行"删除 `campus-tools`"与"保存引用 `formula_hint@campus-tools` 的技能"，结束后断言"删除成功且保存失败"或"保存成功且删除得到引用名单"二者恰居其一，并且不存在引用已删除服务器的技能；全程无死锁错误（1213）
+- [x] 6.3 并发互斥 — verify: `go test ./internal/db -run DeleteVsSaveRace -count=20`：每次并发执行"删除 `campus-tools`"与"保存引用 `formula_hint@campus-tools` 的技能"，结束后断言"删除成功且保存失败"或"保存成功且删除得到引用名单"二者恰居其一，并且不存在引用已删除服务器的技能；全程无死锁错误（1213）
 - [ ] 6.4 本组验证 — verify: `cd backend && go test ./internal/db/... ./internal/tutor/... ./internal/mcp/...` 通过；`python apitest/run_all.py` 中 skills 与 mcp servers 相关用例全部通过
 
 ## 7. apitest、README 与证据

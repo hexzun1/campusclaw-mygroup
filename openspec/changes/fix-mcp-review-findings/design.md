@@ -128,10 +128,12 @@
   3. 若有引用，返回技能名列表（handler 返回 409）；否则 `DELETE`。
 
   原来的 `ListSkillsReferencingServer` 加 `DeleteServer` 两步调用被替换。
-- **保存**：`db.CreateSkill`、`db.UpdateSkill` 增加参数 `refs []db.SkillServerRef`（服务器名去重后按名称排序）。事务开始后、锁技能行之前执行：
-  - `SELECT name, status FROM mcp_servers WHERE class_id=? AND name IN (...) ORDER BY name FOR SHARE`。
+- **保存**：`db.CreateSkill`、`db.UpdateSkill` 增加参数 `refs []db.SkillServerRef`（服务器名去重后按名称排序）。事务开始后、锁技能行之前，对每个服务器：
+  - `SELECT id FROM mcp_servers WHERE class_id=? AND name=?`（普通读，用于取 id）。
+  - `SELECT status FROM mcp_servers WHERE id=? AND class_id=? FOR SHARE`（按主键加锁读）。
   - 缺失的服务器返回 `ErrSkillServerMissing{Name}`，非 `connected` 的返回 `ErrSkillServerNotConnected{Name}`。
   - handler 把它们映射为 400，文案与 `validateSkillMCPTools` 的 ② ③ 一致。
+  - **为什么不直接 `WHERE class_id=? AND name=? FOR SHARE`**：那是唯一键 `uq_mcp_servers_class_name` 上的加锁读，会对二级索引记录与主键记录都加 S 锁；删除走主键 X 锁再改二级索引，两条路径的索引加锁顺序相反，实测在并发下触发 MySQL 1213 死锁。改成"快照读取 id、再按主键加锁读"后，保存与删除、断开、写缓存都只在主键上取锁，顺序一致。快照读可能读到已删除的行，随后的主键加锁读返回零行，正好落到 `ErrSkillServerMissing`。
 - **加锁顺序**：`UpdateSkill` 现在先锁技能行。调整为先锁服务器、再锁技能，与删除的顺序一致，避免"删除持服务器 X 锁等技能，保存持技能锁等服务器"的死锁。断开、写缓存（`updateServerState`、`ReplaceServerTools`）本来就先锁服务器行，天然与保存串行。
 - **兜底**：事务外的 `validateSkillMCPTools` 保留，用于给出包含 ④ ⑤ 的完整错误信息。事务内只复核 ② ③。④（工具在缓存中）不在事务内复核：重新连接导致工具消失属于运行时降级范围。
 - **备选**：给 `skills` 加外键。但引用存在 JSON 数组里，无法建外键，需要拆表，改动过大，不采用。

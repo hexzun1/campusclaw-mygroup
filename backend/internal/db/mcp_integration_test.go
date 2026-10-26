@@ -5,8 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 func createTestMCPServer(t *testing.T, conn *sql.DB, classID, createdBy int, name, token string) int {
@@ -506,5 +510,112 @@ func TestSkillServerLock(t *testing.T) {
 	}
 	if stored.TriggerText != "测试，test" || string(stored.ToolsJSON) != "[]" {
 		t.Errorf("rejected update changed the row: %+v", stored)
+	}
+}
+
+// TestDeleteVsSaveRace is design.md Decision 11 under concurrency: a delete of
+// a referenced server and a save that references it take their locks in the
+// same order, so each race ends one of two ways and never leaves a skill
+// pointing at a server that no longer exists. Run with -count=20.
+func TestDeleteVsSaveRace(t *testing.T) {
+	conn := openTestDB(t)
+	ctx := context.Background()
+	classA, _, teacherA := fixture(t, conn)
+
+	const rounds = 6
+	for i := 0; i < rounds; i++ {
+		serverName := fmt.Sprintf("race-tools-%d", i)
+		serverID := createTestMCPServer(t, conn, classA, teacherA, serverName, "token-abc")
+		if _, err := conn.ExecContext(ctx,
+			`UPDATE mcp_servers SET status = ? WHERE id = ?`, MCPServerConnected, serverID); err != nil {
+			t.Fatalf("round %d: mark the server connected: %v", i, err)
+		}
+		skillName := fmt.Sprintf("测试技能-并发互斥-%d", i)
+		t.Cleanup(func() {
+			if _, err := conn.ExecContext(context.Background(),
+				`DELETE FROM skills WHERE class_id = ? AND name = ?`, classA, skillName); err != nil {
+				t.Errorf("cleanup skill %s: %v", skillName, err)
+			}
+		})
+
+		start := make(chan struct{})
+		type outcome struct {
+			refs []string
+			err  error
+		}
+		deleted := make(chan outcome, 1)
+		saved := make(chan outcome, 1)
+
+		go func() {
+			<-start
+			// Odd rounds let the delete go first; even rounds let the save go
+			// first, so both interleavings are exercised.
+			if i%2 == 1 {
+				time.Sleep(time.Millisecond)
+			}
+			names, err := DeleteServerIfUnreferenced(ctx, conn, serverID, classA)
+			deleted <- outcome{refs: names, err: err}
+		}()
+		go func() {
+			<-start
+			if i%2 == 0 {
+				time.Sleep(time.Millisecond)
+			}
+			_, err := CreateSkill(ctx, conn, Skill{
+				ClassID: classA, Name: skillName, TriggerText: "测试，test",
+				ToolsJSON:   []byte(`["formula_hint@` + serverName + `"]`),
+				Description: "测试用技能说明。", SourceText: "名称：" + skillName, Enabled: true,
+			}, []SkillServerRef{{Name: serverName}})
+			saved <- outcome{err: err}
+		}()
+		close(start)
+
+		del := <-deleted
+		sav := <-saved
+		assertNoDeadlock(t, i, del.err, sav.err)
+
+		savedOK := sav.err == nil
+		deletedOK := del.err == nil && len(del.refs) == 0
+		referenced := del.err == nil && len(del.refs) == 1 && del.refs[0] == skillName
+		switch {
+		case savedOK && referenced:
+			// The save won: the delete reported the reference and kept the server.
+		case !savedOK && deletedOK:
+			// The delete won: the save was refused with the missing server.
+			var missing ErrSkillServerMissing
+			if !errors.As(sav.err, &missing) || missing.Name != serverName {
+				t.Errorf("round %d: losing save = %v, want ErrSkillServerMissing{%s}", i, sav.err, serverName)
+			}
+		default:
+			t.Fatalf("round %d: delete = %+v, save = %v; want exactly one of "+
+				"{saved + reference reported} or {deleted + save refused}", i, del, sav.err)
+		}
+
+		// Whatever the order, no skill may reference a server that is gone.
+		var dangling int
+		if err := conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM skills WHERE class_id = ? AND name = ? AND JSON_SEARCH(tools_json, 'one', ?) IS NOT NULL`,
+			classA, skillName, "%@"+serverName).Scan(&dangling); err != nil {
+			t.Fatalf("round %d: look for a dangling reference: %v", i, err)
+		}
+		_, serverErr := GetServer(ctx, conn, serverID, classA)
+		switch {
+		case dangling > 0 && errors.Is(serverErr, ErrNotFound):
+			t.Errorf("round %d: a skill still references the deleted server %s", i, serverName)
+		case dangling == 0 && serverErr == nil:
+			t.Errorf("round %d: the server survived without the skill's reference", i)
+		}
+	}
+}
+
+// assertNoDeadlock fails on MySQL error 1213, which would mean the two lock
+// orders do not actually match (design.md Decision 11).
+func assertNoDeadlock(t *testing.T, round int, errs ...error) {
+	t.Helper()
+	for _, err := range errs {
+		var mysqlErr *mysql.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1213 {
+			t.Fatalf("round %d: deadlock (1213): %v", round, err)
+		}
 	}
 }
