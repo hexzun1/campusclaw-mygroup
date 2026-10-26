@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"campusclaw/backend/internal/db"
 	"campusclaw/backend/internal/httpapi"
@@ -35,6 +35,46 @@ var (
 type Handlers struct {
 	Conn   *sql.DB
 	Client *Client
+
+	// store is the persistence Connect needs. Nil means the real database; a
+	// test replaces it to make the cache write fail without one (design.md
+	// Decision 8).
+	store connectStore
+}
+
+// connectStore is the slice of persistence Connect uses, narrow enough for a
+// test double to stand in for it.
+type connectStore interface {
+	Server(ctx context.Context, classID, id int) (*db.MCPServer, error)
+	Token(ctx context.Context, classID, id int) (string, error)
+	ReplaceTools(ctx context.Context, classID, id int, tools []db.MCPTool) error
+	MarkError(ctx context.Context, classID, id int, message string) error
+}
+
+// sqlConnectStore is the production connectStore.
+type sqlConnectStore struct{ conn *sql.DB }
+
+func (s sqlConnectStore) Server(ctx context.Context, classID, id int) (*db.MCPServer, error) {
+	return db.GetServer(ctx, s.conn, id, classID)
+}
+
+func (s sqlConnectStore) Token(ctx context.Context, classID, id int) (string, error) {
+	return db.GetServerToken(ctx, s.conn, id, classID)
+}
+
+func (s sqlConnectStore) ReplaceTools(ctx context.Context, classID, id int, tools []db.MCPTool) error {
+	return db.ReplaceServerTools(ctx, s.conn, id, classID, tools)
+}
+
+func (s sqlConnectStore) MarkError(ctx context.Context, classID, id int, message string) error {
+	return db.MarkServerError(ctx, s.conn, id, classID, message)
+}
+
+func (h *Handlers) connectStore() connectStore {
+	if h.store != nil {
+		return h.store
+	}
+	return sqlConnectStore{conn: h.Conn}
 }
 
 func NewHandlers(conn *sql.DB, client *Client) *Handlers {
@@ -98,9 +138,9 @@ func (h *Handlers) ListServers(w http.ResponseWriter, r *http.Request) {
 // @Tags MCP
 // @Accept json
 // @Produce json
-// @Param body body serverBody true "name（^[a-z][a-z0-9-]{0,31}$）、base_url（http/https、不含账号口令、不以 /mcp 结尾）、token（1–512）"
+// @Param body body serverBody true "name（^[a-z][a-z0-9-]{0,31}$）、base_url（http/https、不含账号口令、不以 /mcp 结尾、不指向本机与内部服务）、token（1–512 字节）"
 // @Success 201 {object} db.MCPServer
-// @Failure 400 {object} httpapi.errorBody "名称、地址或令牌不合法"
+// @Failure 400 {object} httpapi.errorBody "名称不合法、地址不允许（本机、元数据或内部服务）、令牌长度不在 1–512 字节之间"
 // @Failure 401 {object} httpapi.errorBody "未登录或会话已失效"
 // @Failure 403 {object} httpapi.errorBody "仅教师可管理"
 // @Failure 409 {object} httpapi.errorBody "同名服务器已存在"
@@ -123,8 +163,11 @@ func (h *Handlers) CreateServer(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if n := utf8.RuneCountInString(body.Token); n == 0 || n > 512 {
-		httpapi.WriteError(w, http.StatusBadRequest, "令牌长度必须在 1 到 512 个字符之间")
+	// The column is VARBINARY(512), so the bound is in bytes, not characters:
+	// a 171-character Chinese token is 513 bytes and must be a 400, not a
+	// database error surfacing as 503 (spec: 工具服务器登记与管理; design D9).
+	if err := validateToken(body.Token); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -143,6 +186,14 @@ func (h *Handlers) CreateServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpapi.WriteJSON(w, http.StatusCreated, server)
+}
+
+// validateToken bounds the token by bytes, matching VARBINARY(512).
+func validateToken(token string) error {
+	if n := len(token); n == 0 || n > 512 {
+		return errors.New("令牌长度必须在 1 到 512 字节之间")
+	}
+	return nil
 }
 
 func validateBaseURL(raw string) error {
@@ -217,7 +268,7 @@ func (h *Handlers) DeleteServer(w http.ResponseWriter, r *http.Request) {
 // whole-cache replacement on success, error state plus empty cache on failure.
 //
 // @Summary 连接并发现工具
-// @Description 完整握手后整体替换工具缓存；失败返回 502，服务器状态置为 error 且清空缓存。
+// @Description 完整握手后整体替换工具缓存。连接失败（网络不通、超时、重定向、被禁止的地址、令牌被拒绝、协议错误）返回 502，服务器状态置为 error 并清空缓存；发现成功但工具缓存写入失败返回 503，状态同样置为 error。
 // @Tags MCP
 // @Produce json
 // @Param id path int true "服务器编号"
@@ -225,8 +276,8 @@ func (h *Handlers) DeleteServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 401 {object} httpapi.errorBody "未登录或会话已失效"
 // @Failure 403 {object} httpapi.errorBody "仅教师可管理"
 // @Failure 404 {object} httpapi.errorBody "记录不存在"
-// @Failure 502 {object} httpapi.errorBody "无法连接或令牌被拒绝"
-// @Failure 503 {object} httpapi.errorBody "服务暂不可用"
+// @Failure 502 {object} httpapi.errorBody "无法连接（含连接超时、被禁止的地址、被重定向）或令牌被拒绝"
+// @Failure 503 {object} httpapi.errorBody "工具缓存写入失败或服务暂不可用"
 // @Security BearerAuth
 // @Router /api/mcp/servers/{id}/connect [post]
 func (h *Handlers) Connect(w http.ResponseWriter, r *http.Request) {
@@ -235,12 +286,13 @@ func (h *Handlers) Connect(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	server, err := db.GetServer(r.Context(), h.Conn, id, su.ClassID)
+	store := h.connectStore()
+	server, err := store.Server(r.Context(), su.ClassID, id)
 	if err != nil {
 		writeLookupError(w, err)
 		return
 	}
-	token, err := db.GetServerToken(r.Context(), h.Conn, id, su.ClassID)
+	token, err := store.Token(r.Context(), su.ClassID, id)
 	if err != nil {
 		writeLookupError(w, err)
 		return
@@ -248,7 +300,7 @@ func (h *Handlers) Connect(w http.ResponseWriter, r *http.Request) {
 	discovered, err := h.Client.Discover(r.Context(), server.BaseURL, token)
 	if err != nil {
 		message := truncateRunes(err.Error(), 255)
-		if markErr := db.MarkServerError(r.Context(), h.Conn, id, su.ClassID, message); markErr != nil {
+		if markErr := store.MarkError(r.Context(), su.ClassID, id, message); markErr != nil {
 			log.Printf("mcp: mark server %d error: %v", id, markErr)
 		}
 		httpapi.WriteError(w, http.StatusBadGateway, message)
@@ -256,8 +308,15 @@ func (h *Handlers) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tools := filterTools(id, discovered)
-	if err := db.ReplaceServerTools(r.Context(), h.Conn, id, su.ClassID, tools); err != nil {
+	if err := store.ReplaceTools(r.Context(), su.ClassID, id, tools); err != nil {
+		// The remote answered fine; this is our own storage failing. Say so and
+		// leave the server in error, or the page would keep showing a stale
+		// tool list as if the connection had worked (design.md Decision 8).
 		log.Printf("mcp: replace tools for server %d: %v", id, err)
+		if markErr := store.MarkError(r.Context(), su.ClassID, id,
+			"工具缓存写入失败，请重试连接"); markErr != nil {
+			log.Printf("mcp: mark server %d error after cache failure: %v", id, markErr)
+		}
 		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
 		return
 	}
@@ -357,15 +416,24 @@ func (h *Handlers) ListCalls(w http.ResponseWriter, r *http.Request) {
 
 func filterTools(serverID int, discovered []Tool) []db.MCPTool {
 	out := make([]db.MCPTool, 0, len(discovered))
+	// A remote may list the same name twice; the cache is keyed by name, so
+	// the first occurrence wins and the rest are logged (spec: 连接与工具发现;
+	// design.md Decision 7).
+	seen := make(map[string]bool, len(discovered))
 	for _, tool := range discovered {
 		if !toolNameRE.MatchString(tool.Name) {
 			log.Printf("mcp: dropped tool with invalid name %q from server %d", tool.Name, serverID)
+			continue
+		}
+		if seen[tool.Name] {
+			log.Printf("mcp: dropped duplicate tool %q from server %d, keeping the first", tool.Name, serverID)
 			continue
 		}
 		if len(tool.InputSchema) > maxSchemaBytes {
 			log.Printf("mcp: dropped tool %q from server %d: inputSchema exceeds %d bytes", tool.Name, serverID, maxSchemaBytes)
 			continue
 		}
+		seen[tool.Name] = true
 		out = append(out, db.MCPTool{
 			Name:        tool.Name,
 			Description: truncateRunes(tool.Description, maxDescriptionRunes),

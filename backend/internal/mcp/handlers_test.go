@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"campusclaw/backend/internal/db"
+	"campusclaw/backend/internal/httpapi"
 )
 
 // TestFilterTools covers the connect-time cache policy (spec: 登记、连接与发现):
@@ -175,5 +177,138 @@ func TestValidateBaseURL(t *testing.T) {
 		if (err != nil) != tc.wantErr {
 			t.Errorf("validateBaseURL(%q) err = %v, wantErr = %v", tc.raw, err, tc.wantErr)
 		}
+	}
+}
+
+// TestTokenBytes is spec 「工具服务器登记与管理」Scenario 令牌按字节计长度: the
+// bound counts UTF-8 bytes, so 171 Chinese characters (513 bytes) fail and 170
+// (510 bytes) pass.
+func TestTokenBytes(t *testing.T) {
+	cases := []struct {
+		name    string
+		token   string
+		wantErr bool
+	}{
+		{"空", "", true},
+		{"1 字节", "a", false},
+		{"512 字节", strings.Repeat("a", 512), false},
+		{"513 字节", strings.Repeat("a", 513), true},
+		{"170 个汉字=510 字节", strings.Repeat("令", 170), false},
+		{"171 个汉字=513 字节", strings.Repeat("令", 171), true},
+		{"256 个汉字=768 字节", strings.Repeat("令", 256), true},
+	}
+	for _, tc := range cases {
+		err := validateToken(tc.token)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("%s: validateToken(%d bytes) err = %v, wantErr = %v",
+				tc.name, len(tc.token), err, tc.wantErr)
+		}
+		if err != nil && !strings.Contains(err.Error(), "字节") {
+			t.Errorf("%s: error = %q, want it to say 字节", tc.name, err)
+		}
+	}
+}
+
+// TestDuplicateTools is spec 「连接与工具发现」Scenario 重名工具去重 at the
+// filter: the first occurrence wins and keeps its description.
+func TestDuplicateTools(t *testing.T) {
+	got := filterTools(9, []Tool{
+		{Name: "echo", Description: "第一条说明", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "echo", Description: "第二条说明", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		{Name: "second_tool", Description: "另一个工具", InputSchema: json.RawMessage(`{}`)},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("kept = %+v, want echo and second_tool", got)
+	}
+	if got[0].Name != "echo" || got[0].Description != "第一条说明" {
+		t.Errorf("echo = %+v, want the first occurrence", got[0])
+	}
+	if got[1].Name != "second_tool" {
+		t.Errorf("order = %+v, want the first occurrence order kept", got)
+	}
+}
+
+// fakeConnectStore is the in-memory connectStore used to make the cache write
+// fail without a database.
+type fakeConnectStore struct {
+	server       *db.MCPServer
+	token        string
+	replaceErr   error
+	markErr      error
+	markedWith   string
+	replacedWith []db.MCPTool
+}
+
+func (f *fakeConnectStore) Server(ctx context.Context, classID, id int) (*db.MCPServer, error) {
+	if f.server == nil {
+		return nil, db.ErrNotFound
+	}
+	return f.server, nil
+}
+
+func (f *fakeConnectStore) Token(ctx context.Context, classID, id int) (string, error) {
+	if f.server == nil {
+		return "", db.ErrNotFound
+	}
+	return f.token, nil
+}
+
+func (f *fakeConnectStore) ReplaceTools(ctx context.Context, classID, id int, tools []db.MCPTool) error {
+	f.replacedWith = tools
+	return f.replaceErr
+}
+
+func (f *fakeConnectStore) MarkError(ctx context.Context, classID, id int, message string) error {
+	f.markedWith = message
+	return f.markErr
+}
+
+// TestConnectCacheWriteFailureMarksError is spec 「连接与工具发现」: a discovery
+// that succeeds but cannot be cached answers 503 and leaves the server in
+// error with a readable last_error (design D8).
+func TestConnectCacheWriteFailureMarksError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "initialize":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"formula_hint","description":"公式","inputSchema":{}}]}}`))
+		}
+	}))
+	defer srv.Close()
+
+	store := &fakeConnectStore{
+		server:     &db.MCPServer{ID: 11, Name: "测试", BaseURL: srv.URL, Status: db.MCPServerDisconnected},
+		token:      testToken,
+		replaceErr: errors.New("insert mcp tool echo: Error 1062"),
+	}
+	h := &Handlers{Client: newTestClient(2*time.Second, 2*time.Second, 256*1024), store: store}
+
+	r := httptest.NewRequest(http.MethodPost, "/api/mcp/servers/11/connect", nil)
+	r.SetPathValue("id", "11")
+	r = r.WithContext(httpapi.WithSessionUser(r.Context(), &db.SessionUser{UserID: 1, ClassID: 1, Role: db.RoleTeacher}))
+	w := httptest.NewRecorder()
+
+	h.Connect(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if store.markedWith != "工具缓存写入失败，请重试连接" {
+		t.Errorf("last_error = %q, want 工具缓存写入失败，请重试连接", store.markedWith)
+	}
+	if len(store.replacedWith) != 1 || store.replacedWith[0].Name != "formula_hint" {
+		t.Errorf("replaced tools = %+v, want the filtered list", store.replacedWith)
+	}
+	if strings.Contains(w.Body.String(), testToken) {
+		t.Errorf("the response leaks the token: %s", w.Body.String())
 	}
 }

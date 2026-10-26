@@ -1043,7 +1043,7 @@ const docTemplate = `{
                 "summary": "登记工具服务器",
                 "parameters": [
                     {
-                        "description": "name（^[a-z][a-z0-9-]{0,31}$）、base_url（http/https、不含账号口令、不以 /mcp 结尾）、token（1–512）",
+                        "description": "name（^[a-z][a-z0-9-]{0,31}$）、base_url（http/https、不含账号口令、不以 /mcp 结尾、不指向本机与内部服务）、token（1–512 字节）",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -1060,7 +1060,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "名称、地址或令牌不合法",
+                        "description": "名称不合法、地址不允许（本机、元数据或内部服务）、令牌长度不在 1–512 字节之间",
                         "schema": {
                             "$ref": "#/definitions/ErrorBody"
                         }
@@ -1159,7 +1159,7 @@ const docTemplate = `{
                         "BearerAuth": []
                     }
                 ],
-                "description": "完整握手后整体替换工具缓存；失败返回 502，服务器状态置为 error 且清空缓存。",
+                "description": "完整握手后整体替换工具缓存。连接失败（网络不通、超时、重定向、被禁止的地址、令牌被拒绝、协议错误）返回 502，服务器状态置为 error 并清空缓存；发现成功但工具缓存写入失败返回 503，状态同样置为 error。",
                 "produces": [
                     "application/json"
                 ],
@@ -1205,13 +1205,13 @@ const docTemplate = `{
                         }
                     },
                     "502": {
-                        "description": "无法连接或令牌被拒绝",
+                        "description": "无法连接（含连接超时、被禁止的地址、被重定向）或令牌被拒绝",
                         "schema": {
                             "$ref": "#/definitions/ErrorBody"
                         }
                     },
                     "503": {
-                        "description": "服务暂不可用",
+                        "description": "工具缓存写入失败或服务暂不可用",
                         "schema": {
                             "$ref": "#/definitions/ErrorBody"
                         }

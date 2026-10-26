@@ -28,10 +28,10 @@
 
 ## 5. 登记与发现的健壮性
 
-- [ ] 5.1 令牌长度按 `len()` 字节计，文案改为「令牌长度必须在 1 到 512 字节之间」（design D9）— verify: `go test ./internal/mcp -run TokenBytes`；开发栈上 171 个汉字的令牌得 400、170 个汉字得 201，均非 503
-- [ ] 5.2 `filterTools` 按名称去重，保留首次出现的工具并记日志（design D7）— verify: `go test ./internal/mcp -run DuplicateTools`：`httptest` 远端两次列出 `echo`，`Connect` 得 200，缓存中 `echo` 只有一条且说明为第一条的说明
-- [ ] 5.3 `ReplaceServerTools` 失败时调用 `MarkServerError(..., "工具缓存写入失败，请重试连接")` 并返回 503（design D8）— verify: `go test ./internal/mcp -run ReplaceFailure`（注入失败的数据层）断言状态为 `error`、`last_error` 为该文案、响应为 503
-- [ ] 5.4 本组验证 — verify: `cd backend && go test ./internal/mcp/...` 通过；swag 注解中 `POST /api/mcp/servers` 的 400 说明含「地址不允许、令牌按字节计」，`connect` 的 502/503 说明同步更新后 `swag init` 重新生成，`curl -s $API/openapi.json | python3 -c 'import sys,json;json.load(sys.stdin)'` 无错
+- [x] 5.1 令牌长度按 `len()` 字节计，文案改为「令牌长度必须在 1 到 512 字节之间」（design D9）— verify: `go test ./internal/mcp -run TokenBytes`；开发栈上 171 个汉字的令牌得 400、170 个汉字得 201，均非 503
+- [x] 5.2 `filterTools` 按名称去重，保留首次出现的工具并记日志（design D7）— verify: `go test ./internal/mcp -run DuplicateTools`：`httptest` 远端两次列出 `echo`，`Connect` 得 200，缓存中 `echo` 只有一条且说明为第一条的说明
+- [x] 5.3 `ReplaceServerTools` 失败时调用 `MarkServerError(..., "工具缓存写入失败，请重试连接")` 并返回 503（design D8）— verify: `go test ./internal/mcp -run ReplaceFailure`（注入失败的数据层）断言状态为 `error`、`last_error` 为该文案、响应为 503
+- [x] 5.4 本组验证 — verify: `cd backend && go test ./internal/mcp/...` 通过；swag 注解中 `POST /api/mcp/servers` 的 400 说明含「地址不允许、令牌按字节计」，`connect` 的 502/503 说明同步更新后 `swag init` 重新生成，`curl -s $API/openapi.json | python3 -c 'import sys,json;json.load(sys.stdin)'` 无错
 
 ## 6. 删除与保存技能互斥
 
