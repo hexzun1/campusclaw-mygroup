@@ -315,8 +315,87 @@ func DeleteServer(ctx context.Context, conn *sql.DB, id, classID int) error {
 	return nil
 }
 
+// DeleteServerIfUnreferenced deletes a server only when no class skill still
+// references it, and does the reference check inside the same transaction that
+// deletes. Returns the referencing skill names when it refuses.
+//
+// Lock order is server first, then skills — the same order CreateSkill and
+// UpdateSkill take, so a save and a delete cannot deadlock (design.md
+// Decision 11).
+func DeleteServerIfUnreferenced(ctx context.Context, conn *sql.DB, id, classID int) ([]string, error) {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin delete server tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var name string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT name FROM mcp_servers WHERE id = ? AND class_id = ? FOR UPDATE`,
+		id, classID).Scan(&name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("lock mcp server: %w", err)
+	}
+
+	names, err := referencingSkills(ctx, tx, classID, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) > 0 {
+		return names, nil
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_servers WHERE id = ? AND class_id = ?`, id, classID); err != nil {
+		return nil, fmt.Errorf("delete mcp server: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit delete server tx: %w", err)
+	}
+	return nil, nil
+}
+
+// referencingSkills returns the class's skills whose tools_json names the
+// server. The read takes FOR SHARE: under REPEATABLE READ a plain read could
+// return a snapshot from before a concurrent save committed (design.md
+// Decision 11).
+func referencingSkills(ctx context.Context, tx *sql.Tx, classID int, serverName string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT name, tools_json FROM skills WHERE class_id = ? ORDER BY id FOR SHARE`, classID)
+	if err != nil {
+		return nil, fmt.Errorf("list skills for mcp reference: %w", err)
+	}
+	defer rows.Close()
+
+	suffix := "@" + serverName
+	var names []string
+	for rows.Next() {
+		var (
+			name  string
+			tools []byte
+		)
+		if err := rows.Scan(&name, &tools); err != nil {
+			return nil, fmt.Errorf("scan skill for mcp reference: %w", err)
+		}
+		var refs []string
+		if err := json.Unmarshal(tools, &refs); err != nil {
+			continue
+		}
+		for _, ref := range refs {
+			if strings.HasSuffix(ref, suffix) {
+				names = append(names, name)
+				break
+			}
+		}
+	}
+	return names, rows.Err()
+}
+
 // ListSkillsReferencingServer returns the names of class skills whose
-// tools_json contains an exact `tool@serverName` reference.
+// tools_json contains an exact `tool@serverName` reference. It is the
+// read-only form used where no deletion follows; the delete path uses
+// DeleteServerIfUnreferenced so the check cannot go stale.
 func ListSkillsReferencingServer(ctx context.Context, conn *sql.DB, classID int, serverName string) ([]string, error) {
 	rows, err := conn.QueryContext(ctx,
 		`SELECT name, tools_json FROM skills WHERE class_id = ? ORDER BY id`, classID)

@@ -31,7 +31,7 @@ func createTestSkill(t *testing.T, conn *sql.DB, classID int, name string) int {
 		Description: "测试用技能说明。",
 		SourceText:  "名称：" + name,
 		Enabled:     true,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("insert test skill: %v", err)
 	}

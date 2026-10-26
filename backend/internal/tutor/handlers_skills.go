@@ -145,9 +145,9 @@ func (h *Handlers) CreateSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	s.ClassID = su.ClassID
 
-	id, err := db.CreateSkill(r.Context(), h.Conn, s)
+	id, err := db.CreateSkill(r.Context(), h.Conn, s, skillServerRefs(s.ToolsJSON))
 	if err != nil {
-		writeWriteError(w, err, "已存在同名技能")
+		writeSkillSaveError(w, err)
 		return
 	}
 	httpapi.WriteJSON(w, http.StatusCreated, map[string]int{"id": id})
@@ -209,8 +209,8 @@ func (h *Handlers) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 	s.ID = id
 	s.ClassID = su.ClassID
 
-	if err := db.UpdateSkill(r.Context(), h.Conn, s); err != nil {
-		writeWriteError(w, err, "已存在同名技能")
+	if err := db.UpdateSkill(r.Context(), h.Conn, s, skillServerRefs(s.ToolsJSON)); err != nil {
+		writeSkillSaveError(w, err)
 		return
 	}
 	httpapi.WriteJSON(w, http.StatusOK, map[string]int{"id": id})

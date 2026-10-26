@@ -104,7 +104,9 @@ func ensureSeedSkill(ctx context.Context, conn *sql.DB, classID int, seedKey, so
 	s.ClassID = classID
 	s.SeedKey = seedKey
 
-	id, err := db.CreateSkill(ctx, conn, s)
+	// Seeded skills reference only knowledge_search, never an MCP server, so
+	// there is nothing to lock.
+	id, err := db.CreateSkill(ctx, conn, s, nil)
 	if errors.Is(err, db.ErrDuplicateName) {
 		log.Printf("seed: skill %q already exists in class %d outside the seed, keeping it", s.Name, classID)
 		return 0, nil

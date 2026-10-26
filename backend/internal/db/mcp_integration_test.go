@@ -368,3 +368,143 @@ func TestInsertToolCallsTruncatedRowSharesTheBatch(t *testing.T) {
 		t.Errorf("normal row = %+v", ours[1])
 	}
 }
+
+// TestDeleteServerIfUnreferenced is spec 「工具服务器登记与管理」: the check and
+// the delete share a transaction, so a referenced server stays and its skills
+// are named, while an unreferenced one goes (design D11).
+func TestDeleteServerIfUnreferenced(t *testing.T) {
+	conn := openTestDB(t)
+	ctx := context.Background()
+	classA, _, teacherA := fixture(t, conn)
+
+	serverName := "测试服务器-删除互斥"
+	serverID := createTestMCPServer(t, conn, classA, teacherA, serverName, "token-abc")
+	skillName := "测试技能-引用删除互斥"
+	skillID := createTestSkill(t, conn, classA, skillName)
+	if _, err := conn.ExecContext(ctx, `UPDATE skills SET tools_json = ? WHERE id = ?`,
+		[]byte(`["formula_hint@`+serverName+`"]`), skillID); err != nil {
+		t.Fatalf("point the skill at the server: %v", err)
+	}
+
+	names, err := DeleteServerIfUnreferenced(ctx, conn, serverID, classA)
+	if err != nil {
+		t.Fatalf("DeleteServerIfUnreferenced (referenced): %v", err)
+	}
+	if len(names) != 1 || names[0] != skillName {
+		t.Errorf("referencing skills = %v, want [%s]", names, skillName)
+	}
+	if _, err := GetServer(ctx, conn, serverID, classA); err != nil {
+		t.Errorf("the referenced server was deleted: %v", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, `UPDATE skills SET tools_json = ? WHERE id = ?`, []byte(`[]`), skillID); err != nil {
+		t.Fatalf("clear the reference: %v", err)
+	}
+
+	names, err = DeleteServerIfUnreferenced(ctx, conn, serverID, classA)
+	if err != nil {
+		t.Fatalf("DeleteServerIfUnreferenced (unreferenced): %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("referencing skills = %v, want none", names)
+	}
+	if _, err := GetServer(ctx, conn, serverID, classA); !errors.Is(err, ErrNotFound) {
+		t.Errorf("server still exists after delete: %v", err)
+	}
+
+	// A missing row and another class's row answer the same way.
+	if _, err := DeleteServerIfUnreferenced(ctx, conn, serverID, classA); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second delete = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSkillServerLock is spec 「技能对 MCP 工具的引用校验」Scenario 保存期间服务器
+// 被删除: the reference is re-checked inside the skill's own transaction, so a
+// server deleted after the caller's outside check blocks the save with
+// ErrSkillServerMissing and writes nothing (design D11).
+func TestSkillServerLock(t *testing.T) {
+	conn := openTestDB(t)
+	ctx := context.Background()
+	classA, _, teacherA := fixture(t, conn)
+
+	serverName := "测试服务器-保存加锁"
+	serverID := createTestMCPServer(t, conn, classA, teacherA, serverName, "token-abc")
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE mcp_servers SET status = ? WHERE id = ?`, MCPServerConnected, serverID); err != nil {
+		t.Fatalf("mark the server connected: %v", err)
+	}
+	refs := []SkillServerRef{{Name: serverName}}
+
+	// Happy path: a connected server is accepted, so the re-check is not what
+	// rejects every save.
+	okName := "测试技能-保存加锁-正常"
+	okID, err := CreateSkill(ctx, conn, Skill{
+		ClassID: classA, Name: okName, TriggerText: "测试，test",
+		ToolsJSON:   []byte(`["formula_hint@` + serverName + `"]`),
+		Description: "测试用技能说明。", SourceText: "名称：" + okName, Enabled: true,
+	}, refs)
+	if err != nil {
+		t.Fatalf("CreateSkill against a connected server: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := conn.ExecContext(context.Background(), `DELETE FROM skills WHERE id = ?`, okID); err != nil {
+			t.Errorf("cleanup skill %d: %v", okID, err)
+		}
+	})
+
+	// The outside check passed, then the server went away.
+	if err := DeleteServer(ctx, conn, serverID, classA); err != nil {
+		t.Fatalf("delete the server after the outside check: %v", err)
+	}
+
+	missingName := "测试技能-保存加锁-已删"
+	_, err = CreateSkill(ctx, conn, Skill{
+		ClassID: classA, Name: missingName, TriggerText: "测试，test",
+		ToolsJSON:   []byte(`["formula_hint@` + serverName + `"]`),
+		Description: "测试用技能说明。", SourceText: "名称：" + missingName, Enabled: true,
+	}, refs)
+	var missing ErrSkillServerMissing
+	if !errors.As(err, &missing) || missing.Name != serverName {
+		t.Fatalf("CreateSkill after the delete = %v, want ErrSkillServerMissing{%s}", err, serverName)
+	}
+	var written int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM skills WHERE class_id = ? AND name = ?`, classA, missingName).Scan(&written); err != nil {
+		t.Fatalf("count the rejected skill: %v", err)
+	}
+	if written != 0 {
+		t.Errorf("the rejected skill was written (%d rows); the transaction must roll back", written)
+	}
+
+	// A server that exists but is not connected is refused too: the tool loop
+	// could only deny such a reference at run time.
+	offlineName := "测试服务器-保存未连接"
+	offlineID := createTestMCPServer(t, conn, classA, teacherA, offlineName, "token-abc")
+	offlineSkill := "测试技能-保存未连接"
+	if _, err := CreateSkill(ctx, conn, Skill{
+		ClassID: classA, Name: offlineSkill, TriggerText: "测试，test",
+		ToolsJSON:   []byte(`["formula_hint@` + offlineName + `"]`),
+		Description: "测试用技能说明。", SourceText: "名称：" + offlineSkill, Enabled: true,
+	}, []SkillServerRef{{Name: offlineName}}); !errors.As(err, new(ErrSkillServerNotConnected)) {
+		t.Errorf("CreateSkill against a disconnected server = %v, want ErrSkillServerNotConnected (id %d)", err, offlineID)
+	}
+
+	// UpdateSkill takes the same check and leaves the old row untouched.
+	otherName := "测试技能-保存加锁-更新"
+	otherID := createTestSkill(t, conn, classA, otherName)
+	err = UpdateSkill(ctx, conn, Skill{
+		ID: otherID, ClassID: classA, Name: otherName, TriggerText: "改过的，changed",
+		ToolsJSON:   []byte(`["formula_hint@` + serverName + `"]`),
+		Description: "改过的说明。", SourceText: "名称：" + otherName, Enabled: true,
+	}, refs)
+	if !errors.As(err, new(ErrSkillServerMissing)) {
+		t.Fatalf("UpdateSkill after the delete = %v, want ErrSkillServerMissing", err)
+	}
+	stored, err := GetSkill(ctx, conn, otherID, classA)
+	if err != nil {
+		t.Fatalf("re-read the untouched skill: %v", err)
+	}
+	if stored.TriggerText != "测试，test" || string(stored.ToolsJSON) != "[]" {
+		t.Errorf("rejected update changed the row: %+v", stored)
+	}
+}

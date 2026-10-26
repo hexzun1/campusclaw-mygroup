@@ -20,6 +20,29 @@ var ErrDuplicateName = errors.New("duplicate name")
 // wrong, the class simply has no usable agent.
 var ErrNoEnabledAgents = errors.New("no enabled agents")
 
+// ErrSkillServerMissing reports an MCP server a skill references that is not in
+// the class. It is re-checked inside the skill's own transaction, so a save
+// racing a delete cannot leave a dangling reference (design.md Decision 11).
+type ErrSkillServerMissing struct{ Name string }
+
+func (e ErrSkillServerMissing) Error() string {
+	return "mcp server " + e.Name + " not found in class"
+}
+
+// ErrSkillServerNotConnected reports a referenced server that exists but is
+// not connected; saving then would create a reference the tool loop can only
+// deny (design.md Decision 11).
+type ErrSkillServerNotConnected struct{ Name string }
+
+func (e ErrSkillServerNotConnected) Error() string {
+	return "mcp server " + e.Name + " is not connected"
+}
+
+// SkillServerRef is one server a skill's tools_json references. Refs are
+// deduped and sorted by name before the transaction opens, so two saves of the
+// same content lock rows in the same order (design.md Decision 11).
+type SkillServerRef struct{ Name string }
+
 // TutorAgent is one tutor agent row plus its current bindings. SkillIDs and
 // MaterialIDs are always class-local: the binding write path validates that
 // every id belongs to the agent's class.
@@ -482,12 +505,21 @@ func ListAgentSkillsEnabled(ctx context.Context, conn *sql.DB, agentID, classID 
 
 // CreateSkill inserts a skill after a same-class name check. ErrDuplicateName
 // maps to 400.
-func CreateSkill(ctx context.Context, conn *sql.DB, s Skill) (int, error) {
+//
+// refs are the MCP servers the skill's tools_json names. They are re-checked
+// with FOR SHARE inside this transaction, before the skill row is written, so
+// a delete that lands after the caller's outside check still blocks the save
+// (spec: 技能对 MCP 工具的引用校验; design.md Decision 11).
+func CreateSkill(ctx context.Context, conn *sql.DB, s Skill, refs []SkillServerRef) (int, error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if err := lockSkillServers(ctx, tx, s.ClassID, refs); err != nil {
+		return 0, err
+	}
 
 	if dup, err := skillNameTaken(ctx, tx, s.ClassID, s.Name, 0); err != nil {
 		return 0, err
@@ -518,12 +550,20 @@ func CreateSkill(ctx context.Context, conn *sql.DB, s Skill) (int, error) {
 
 // UpdateSkill replaces a skill's content (but not its seed key) after a
 // same-class existence check; ErrNotFound covers missing and wrong class.
-func UpdateSkill(ctx context.Context, conn *sql.DB, s Skill) error {
+//
+// The lock order is servers first, then the skill row — the same order
+// DeleteServerIfUnreferenced takes, so a save and a delete cannot deadlock
+// (design.md Decision 11).
+func UpdateSkill(ctx context.Context, conn *sql.DB, s Skill, refs []SkillServerRef) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if err := lockSkillServers(ctx, tx, s.ClassID, refs); err != nil {
+		return err
+	}
 
 	var existing int
 	if err := tx.QueryRowContext(ctx,
@@ -569,6 +609,33 @@ func DeleteSkill(ctx context.Context, conn *sql.DB, id, classID int) error {
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+// lockSkillServers re-checks, inside the caller's transaction, that every
+// referenced MCP server still exists in the class and is connected. FOR SHARE
+// serialises against DeleteServerIfUnreferenced and against disconnect, which
+// both lock the server row first (design.md Decision 11).
+//
+// Rule ④ (the tool is still in the cache) is deliberately not re-checked here:
+// a reconnect can legitimately shrink the cache, and the tool loop already
+// degrades such a reference at run time.
+func lockSkillServers(ctx context.Context, tx *sql.Tx, classID int, refs []SkillServerRef) error {
+	for _, ref := range refs {
+		var status string
+		err := tx.QueryRowContext(ctx,
+			`SELECT status FROM mcp_servers WHERE class_id = ? AND name = ? FOR SHARE`,
+			classID, ref.Name).Scan(&status)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSkillServerMissing{Name: ref.Name}
+		}
+		if err != nil {
+			return fmt.Errorf("lock mcp server %q for skill save: %w", ref.Name, err)
+		}
+		if status != MCPServerConnected {
+			return ErrSkillServerNotConnected{Name: ref.Name}
+		}
 	}
 	return nil
 }

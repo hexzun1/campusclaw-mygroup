@@ -240,14 +240,12 @@ func (h *Handlers) DeleteServer(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	server, err := db.GetServer(r.Context(), h.Conn, id, su.ClassID)
+	// The reference check and the delete share one transaction, so a skill
+	// saved at the same moment either wins (409 here) or loses (400 there);
+	// no dangling reference can survive (spec: 工具服务器登记与管理).
+	skills, err := db.DeleteServerIfUnreferenced(r.Context(), h.Conn, id, su.ClassID)
 	if err != nil {
 		writeLookupError(w, err)
-		return
-	}
-	skills, err := db.ListSkillsReferencingServer(r.Context(), h.Conn, su.ClassID, server.Name)
-	if err != nil {
-		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
 		return
 	}
 	if len(skills) > 0 {
@@ -255,10 +253,6 @@ func (h *Handlers) DeleteServer(w http.ResponseWriter, r *http.Request) {
 			Error:  "服务器仍被技能引用，请先解除引用",
 			Skills: skills,
 		})
-		return
-	}
-	if err := db.DeleteServer(r.Context(), h.Conn, id, su.ClassID); err != nil {
-		writeLookupError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
