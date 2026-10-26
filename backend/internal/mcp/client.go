@@ -13,7 +13,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -41,14 +43,66 @@ type Client struct {
 	ConnectTimeout   time.Duration
 	CallTimeout      time.Duration
 	MaxResponseBytes int64
+
+	// allowLoopback lets same-package tests reach an httptest server on
+	// 127.0.0.1. Only newTestClient sets it; NewClient never does, so the
+	// production client always refuses loopback targets (design.md Decision 6).
+	allowLoopback bool
 }
 
+// NewClient builds the production client: no proxy, a dialer that re-checks the
+// resolved IP, and no redirect following (design.md Decision 6).
 func NewClient(connectTimeout, callTimeout time.Duration, maxResponseBytes int64) *Client {
+	return newClient(connectTimeout, callTimeout, maxResponseBytes, false)
+}
+
+// newTestClient is NewClient with the loopback allowance switched on. It exists
+// only for tests that stand a fake server up on 127.0.0.1; the forbidden host
+// names stay forbidden either way.
+func newTestClient(connectTimeout, callTimeout time.Duration, maxResponseBytes int64) *Client {
+	return newClient(connectTimeout, callTimeout, maxResponseBytes, true)
+}
+
+func newClient(connectTimeout, callTimeout time.Duration, maxResponseBytes int64, allowLoopback bool) *Client {
+	dialer := &net.Dialer{
+		Timeout: connectTimeout,
+		// Control runs after resolution with the address actually dialled, so a
+		// hostname resolving into loopback or link-local space is refused even
+		// though the literal check at registration passed.
+		Control: func(network, address string, _ syscall.RawConn) error {
+			if allowLoopback {
+				return nil
+			}
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return errForbiddenTarget
+			}
+			ip := net.ParseIP(host)
+			if ip == nil || forbiddenIP(ip) {
+				return errForbiddenTarget
+			}
+			return nil
+		},
+	}
+	transport := &http.Transport{
+		DialContext: dialer.DialContext,
+		// Proxy must stay nil: with a proxy the Control callback would inspect
+		// the proxy's address instead of the target's.
+		Proxy: nil,
+	}
 	return &Client{
-		HTTPClient:       &http.Client{},
+		HTTPClient: &http.Client{
+			Transport: transport,
+			// A 3xx is a connection failure, not something to follow: the
+			// Location header could point anywhere.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		ConnectTimeout:   connectTimeout,
 		CallTimeout:      callTimeout,
 		MaxResponseBytes: maxResponseBytes,
+		allowLoopback:    allowLoopback,
 	}
 }
 
@@ -223,6 +277,12 @@ const (
 )
 
 func (c *Client) post(ctx context.Context, baseURL, token string, s *session, body []byte, phase requestPhase) (*http.Response, []byte, error) {
+	// The stored base_url is checked again on every request: rows registered
+	// before this rule existed are still in the database (design.md Decision 6).
+	// A test client still enforces the name blacklist, only the IP half is off.
+	if err := c.checkTarget(baseURL); err != nil {
+		return nil, nil, err
+	}
 	endpoint := strings.TrimRight(baseURL, "/") + "/mcp"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -292,6 +352,20 @@ func isTimeout(err error) bool {
 	}
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// checkTarget validates a stored base_url before every request. Production
+// clients apply the full rule; test clients skip only the literal-IP half so
+// they can reach an httptest server on loopback.
+func (c *Client) checkTarget(baseURL string) error {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return errForbiddenTarget
+	}
+	if c.allowLoopback {
+		return checkHostName(parsed.Host)
+	}
+	return checkHost(parsed.Host)
 }
 
 // redact removes the token from any message before it reaches a response or a

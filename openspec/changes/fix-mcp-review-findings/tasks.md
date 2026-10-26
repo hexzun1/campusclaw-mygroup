@@ -22,9 +22,9 @@
 
 ## 4. 防 SSRF
 
-- [ ] 4.1 新增 `internal/mcp/target.go` 的 `checkHost`：名称黑名单 `localhost`、`db`、`api`、`qdrant`、`web`（不区分大小写）；IP 字面量为回环、链路本地、未指定地址时拒绝；`validateBaseURL` 调用它并返回 400（design D6）— verify: `go test ./internal/mcp -run CheckHost` 表驱动覆盖 spec「被禁止的地址」中的 9 个地址均被拒、`http://[::ffff:127.0.0.1]` 被拒、`mcp-demo` 与 `10.0.0.5` 放行
-- [ ] 4.2 `NewClient` 使用自定义 `http.Transport`：`Proxy=nil`、`net.Dialer.Control` 检查解析后的实际 IP、`CheckRedirect` 返回 `http.ErrUseLastResponse`；`post` 发请求前再执行一次 `checkHost`；测试专用的未导出字段 `allowLoopback` 由 `newTestClient` 打开，原有 `httptest` 用例改用它 — verify: `go test ./internal/mcp` 全部通过；新增用例 `NewClientRejectsLoopback`：生产构造的客户端连接 `httptest` 服务失败，且服务端未收到任何请求；`RedirectNotFollowed`：远端返回 302 指向第二个 `httptest`，第二个服务收到 0 次请求，`Discover` 报错
-- [ ] 4.3 本组验证 — verify: 开发栈上分别以 `http://localhost:8090`、`http://169.254.169.254`、`http://qdrant:6333` 登记均得 400；以 `http://mcp-demo:8090` 登记得 201 且连接得 200；直接在库中把一台服务器的 `base_url` 改为 `http://db:3306` 后连接，得 502 且 `status=error`
+- [x] 4.1 新增 `internal/mcp/target.go` 的 `checkHost`：名称黑名单 `localhost`、`db`、`api`、`qdrant`、`web`（不区分大小写）；IP 字面量为回环、链路本地、未指定地址时拒绝；`validateBaseURL` 调用它并返回 400（design D6）— verify: `go test ./internal/mcp -run CheckHost` 表驱动覆盖 spec「被禁止的地址」中的 9 个地址均被拒、`http://[::ffff:127.0.0.1]` 被拒、`mcp-demo` 与 `10.0.0.5` 放行
+- [x] 4.2 `NewClient` 使用自定义 `http.Transport`：`Proxy=nil`、`net.Dialer.Control` 检查解析后的实际 IP、`CheckRedirect` 返回 `http.ErrUseLastResponse`；`post` 发请求前再执行一次 `checkHost`；测试专用的未导出字段 `allowLoopback` 由 `newTestClient` 打开，原有 `httptest` 用例改用它 — verify: `go test ./internal/mcp` 全部通过；新增用例 `NewClientRejectsLoopback`：生产构造的客户端连接 `httptest` 服务失败，且服务端未收到任何请求；`RedirectNotFollowed`：远端返回 302 指向第二个 `httptest`，第二个服务收到 0 次请求，`Discover` 报错
+- [x] 4.3 本组验证 — verify: 开发栈上分别以 `http://localhost:8090`、`http://169.254.169.254`、`http://qdrant:6333` 登记均得 400；以 `http://mcp-demo:8090` 登记得 201 且连接得 200；直接在库中把一台服务器的 `base_url` 改为 `http://db:3306` 后连接，得 502 且 `status=error`
 
 ## 5. 登记与发现的健壮性
 

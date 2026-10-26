@@ -127,7 +127,7 @@ func TestDiscoverThenFilterAgainstFakeServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(2*time.Second, 2*time.Second, 256*1024)
+	client := newTestClient(2*time.Second, 2*time.Second, 256*1024)
 	discovered, err := client.Discover(context.Background(), srv.URL, testToken)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)

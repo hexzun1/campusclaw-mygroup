@@ -159,6 +159,12 @@ func validateBaseURL(raw string) error {
 	if strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/mcp") {
 		return errors.New("服务器地址不要以 /mcp 结尾，主机自行拼接 /mcp")
 	}
+	// The literal host is checked here so a bad registration never reaches the
+	// database; the resolved address is checked again at dial time (design.md
+	// Decision 6).
+	if err := checkHost(parsed.Host); err != nil {
+		return err
+	}
 	return nil
 }
 

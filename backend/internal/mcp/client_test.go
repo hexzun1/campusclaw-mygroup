@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -61,7 +62,7 @@ func TestDiscoverPerformsHandshakeAndSendsProtocolHeaders(t *testing.T) {
 		{Name: "unit_convert", Description: "单位换算"},
 	}
 	srv, seen := newFakeServer(t, tools)
-	client := NewClient(2*time.Second, 2*time.Second, 256*1024)
+	client := newTestClient(2*time.Second, 2*time.Second, 256*1024)
 
 	got, err := client.Discover(context.Background(), srv.URL, testToken)
 	if err != nil {
@@ -117,7 +118,7 @@ func TestCallPerformsHandshakeAndKeepsOnlyText(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(2*time.Second, 2*time.Second, 256*1024)
+	client := newTestClient(2*time.Second, 2*time.Second, 256*1024)
 	result, err := client.Call(context.Background(), srv.URL, testToken, "unit_convert", json.RawMessage(`{"value":1.5}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -148,7 +149,7 @@ func TestCallPropagatesIsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(2*time.Second, 2*time.Second, 256*1024)
+	client := newTestClient(2*time.Second, 2*time.Second, 256*1024)
 	result, err := client.Call(context.Background(), srv.URL, testToken, "unit_convert", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -234,7 +235,7 @@ func TestDiscoverErrorClassificationAndRedaction(t *testing.T) {
 			srv := httptest.NewServer(tc.handler)
 			defer srv.Close()
 
-			client := NewClient(tc.timeout, tc.timeout, tc.maxBytes)
+			client := newTestClient(tc.timeout, tc.timeout, tc.maxBytes)
 			_, err := client.Discover(context.Background(), srv.URL, testToken)
 			if err == nil {
 				t.Fatal("Discover succeeded, want error")
@@ -250,7 +251,7 @@ func TestDiscoverErrorClassificationAndRedaction(t *testing.T) {
 }
 
 func TestDiscoverUnreachableServer(t *testing.T) {
-	client := NewClient(200*time.Millisecond, 200*time.Millisecond, 256*1024)
+	client := newTestClient(200*time.Millisecond, 200*time.Millisecond, 256*1024)
 	_, err := client.Discover(context.Background(), "http://127.0.0.1:1", testToken)
 	if err == nil {
 		t.Fatal("Discover succeeded against an unreachable server")
@@ -299,7 +300,7 @@ func TestCallRedactsResult(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(2*time.Second, 2*time.Second, 256*1024)
+	client := newTestClient(2*time.Second, 2*time.Second, 256*1024)
 	result, err := client.Call(context.Background(), srv.URL, testToken, "formula_hint", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -339,7 +340,7 @@ func TestAcceptHeaderDeclaresOnlyJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(2*time.Second, 2*time.Second, 256*1024)
+	client := newTestClient(2*time.Second, 2*time.Second, 256*1024)
 	if _, err := client.Discover(context.Background(), srv.URL, testToken); err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -383,7 +384,7 @@ func TestTimeoutWordingDependsOnThePhase(t *testing.T) {
 	}))
 	defer slowCall.Close()
 
-	client := NewClient(2*time.Second, 50*time.Millisecond, 256*1024)
+	client := newTestClient(2*time.Second, 50*time.Millisecond, 256*1024)
 	_, err := client.Call(context.Background(), slowCall.URL, testToken, "formula_hint", json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("Call succeeded against a server that never answers tools/call")
@@ -403,10 +404,87 @@ func TestTimeoutWordingDependsOnThePhase(t *testing.T) {
 	}))
 	defer slowInit.Close()
 
-	client = NewClient(50*time.Millisecond, 2*time.Second, 256*1024)
+	client = newTestClient(50*time.Millisecond, 2*time.Second, 256*1024)
 	if _, err := client.Discover(context.Background(), slowInit.URL, testToken); err == nil {
 		t.Fatal("Discover succeeded against a server that never answers initialize")
 	} else if !strings.Contains(err.Error(), "连接超时") {
 		t.Errorf("error = %q, want 连接超时", err)
+	}
+}
+
+// TestNewClientRejectsLoopback is the guard against the test-only switch
+// leaking into production: the client NewClient builds must refuse a loopback
+// target, and the fake server must see no request at all.
+func TestNewClientRejectsLoopback(t *testing.T) {
+	var hits int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient(2*time.Second, 2*time.Second, 256*1024)
+	_, err := client.Discover(context.Background(), srv.URL, testToken)
+	if err == nil {
+		t.Fatal("the production client reached a loopback server")
+	}
+	if !strings.Contains(err.Error(), "不允许") {
+		t.Errorf("error = %q, want the forbidden-address message", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 0 {
+		t.Errorf("the fake server saw %d requests, want 0", hits)
+	}
+}
+
+// TestNewClientRejectsServiceNames: the name blacklist does not depend on the
+// loopback switch, so even a test client refuses db/qdrant/web/api/localhost.
+func TestNewClientRejectsServiceNames(t *testing.T) {
+	client := newTestClient(2*time.Second, 2*time.Second, 256*1024)
+	for _, host := range []string{"db", "api", "qdrant", "web", "localhost"} {
+		if _, err := client.Discover(context.Background(), "http://"+host+":8090", testToken); err == nil {
+			t.Errorf("Discover to %q succeeded, want it refused", host)
+		}
+	}
+}
+
+// TestRedirectNotFollowed is spec 「连接与工具发现」Scenario 不跟随重定向: the
+// 302 target must never be contacted.
+func TestRedirectNotFollowed(t *testing.T) {
+	var targetHits int
+	var mu sync.Mutex
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		targetHits++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/mcp", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	client := newTestClient(2*time.Second, 2*time.Second, 256*1024)
+	_, err := client.Discover(context.Background(), redirector.URL, testToken)
+	if err == nil {
+		t.Fatal("Discover followed a redirect")
+	}
+	if !strings.Contains(err.Error(), "302") {
+		t.Errorf("error = %q, want it to name HTTP 302", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if targetHits != 0 {
+		t.Errorf("the redirect target saw %d requests, want 0", targetHits)
 	}
 }
