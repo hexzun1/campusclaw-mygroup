@@ -71,6 +71,56 @@ func TestParseSkillOptionalFieldsAndColonStyles(t *testing.T) {
 	}
 }
 
+func TestParseSkillToolFieldAcceptsOneToThreeValues(t *testing.T) {
+	file := "名称：物理\n适用条件：物理\n工具：knowledge_search，formula_hint@campus-tools, unit_convert@campus-tools\n启用：是\n\n正文"
+	s, err := ParseSkill(file)
+	if err != nil {
+		t.Fatalf("ParseSkill: %v", err)
+	}
+	want := `["knowledge_search","formula_hint@campus-tools","unit_convert@campus-tools"]`
+	if string(s.ToolsJSON) != want {
+		t.Errorf("ToolsJSON = %s, want %s", s.ToolsJSON, want)
+	}
+
+	single := "名称：数学\n适用条件：数学\n工具： formula_hint@campus-tools \n启用：是\n\n正文"
+	s, err = ParseSkill(single)
+	if err != nil {
+		t.Fatalf("ParseSkill single: %v", err)
+	}
+	if string(s.ToolsJSON) != `["formula_hint@campus-tools"]` {
+		t.Errorf("ToolsJSON = %s: surrounding spaces must be trimmed", s.ToolsJSON)
+	}
+}
+
+func TestParseSkillToolFieldErrors(t *testing.T) {
+	cases := []struct {
+		name  string
+		tools string
+		want  string
+	}{
+		{"four values", "knowledge_search,a@campus-tools,b@campus-tools,c@campus-tools", "字段“工具”最多只能有 3 个取值"},
+		{"duplicate", "knowledge_search，knowledge_search", "取值“knowledge_search”重复"},
+		{"tool name uppercase", "Formula@campus-tools", "取值“Formula@campus-tools”不合法"},
+		{"missing server", "formula_hint@", "取值“formula_hint@”不合法"},
+		{"server uppercase", "formula_hint@Campus_Tools", "取值“formula_hint@Campus_Tools”不合法"},
+		{"unknown built-in", "web_search", "取值“web_search”不合法"},
+		{"double at", "formula_hint@@campus-tools", "不合法"},
+		{"empty", "", "取值“”不合法"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			file := "名称：甲\n适用条件：x\n工具：" + tc.tools + "\n启用：是\n\n正文"
+			_, err := ParseSkill(file)
+			if err == nil {
+				t.Fatal("ParseSkill succeeded, want an error")
+			}
+			if !strings.Contains(err.Error(), "字段“工具”") || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to name 工具 and contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseSkillErrorMatrix(t *testing.T) {
 	cases := []struct {
 		name string

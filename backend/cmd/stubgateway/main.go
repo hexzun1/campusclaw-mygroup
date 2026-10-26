@@ -133,6 +133,11 @@ type state struct {
 	failBeforeFirstDelta bool
 	abortAfterDeltas     int
 	chatText             string
+
+	// forcedToolCalls, when non-nil, replaces the deterministic tool call:
+	// an empty list means "answer without calling any tool" (design.md
+	// Decision 12). The pointed-to slice is replaced wholesale on control.
+	forcedToolCalls *[]forcedToolCall
 }
 
 type embeddingRequest struct {
@@ -208,10 +213,42 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
+type toolDefinition struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name       string `json:"name"`
+		Parameters struct {
+			Required   []string `json:"required"`
+			Properties map[string]struct {
+				Type string `json:"type"`
+			} `json:"properties"`
+		} `json:"parameters"`
+	} `json:"function"`
+}
+
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model      string           `json:"model"`
+	Messages   []chatMessage    `json:"messages"`
+	Stream     bool             `json:"stream"`
+	Tools      []toolDefinition `json:"tools"`
+	ToolChoice json.RawMessage  `json:"tool_choice"`
+}
+
+// forcedToolCall is one entry of the /control "指定工具调用" switch. Arguments
+// is the raw string the model would have produced, so invalid JSON can be
+// exercised on purpose.
+type forcedToolCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type stubToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 func (s *state) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +272,11 @@ func (s *state) handleChat(w http.ResponseWriter, r *http.Request) {
 	failBeforeFirst := s.failBeforeFirstDelta
 	abortAfter := s.abortAfterDeltas
 	chatText := s.chatText
+	forcedSet := s.forcedToolCalls != nil
+	var forced []forcedToolCall
+	if forcedSet {
+		forced = append([]forcedToolCall(nil), (*s.forcedToolCalls)...)
+	}
 	s.mu.Unlock()
 
 	if fail {
@@ -247,14 +289,22 @@ func (s *state) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	message := map[string]any{"role": "assistant", "content": answerText(&req, outOfRange, chatText)}
+	finish := "stop"
+	if calls, ok := stubToolCalls(&req, forced, forcedSet); ok {
+		message["content"] = ""
+		message["tool_calls"] = calls
+		finish = "tool_calls"
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":     "stub-chat-completion",
 		"object": "chat.completion",
 		"model":  req.Model,
 		"choices": []map[string]any{{
 			"index":         0,
-			"message":       chatMessage{Role: "assistant", Content: answerText(&req, outOfRange, chatText)},
-			"finish_reason": "stop",
+			"message":       message,
+			"finish_reason": finish,
 		}},
 		"usage": map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
 	})
@@ -267,6 +317,74 @@ func answerText(req *chatRequest, outOfRange bool, chatText string) string {
 		return chatText
 	}
 	return draftAnswer(req, outOfRange)
+}
+
+// stubToolCalls decides whether a non-streamed request with tools produces a
+// tool call (design.md Decision 12). An explicit /control list wins, including
+// an empty one ("answer without tools"); otherwise the first turn calls the
+// first declared tool and any turn already carrying a tool message answers
+// with text.
+func stubToolCalls(req *chatRequest, forced []forcedToolCall, forcedSet bool) ([]stubToolCall, bool) {
+	if len(req.Tools) == 0 {
+		return nil, false
+	}
+	if forcedSet {
+		if len(forced) == 0 {
+			return nil, false
+		}
+		calls := make([]stubToolCall, 0, len(forced))
+		for i, f := range forced {
+			calls = append(calls, newStubToolCall(i, f.Name, f.Arguments))
+		}
+		return calls, true
+	}
+
+	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			return nil, false
+		}
+	}
+
+	first := req.Tools[0].Function
+	args := map[string]any{}
+	question := lastQuestion(req.Messages)
+	for _, name := range first.Parameters.Required {
+		prop := first.Parameters.Properties[name]
+		switch prop.Type {
+		case "number", "integer":
+			args[name] = 1
+		case "boolean":
+			args[name] = true
+		default:
+			args[name] = question
+		}
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		encoded = []byte(`{}`)
+	}
+	return []stubToolCall{newStubToolCall(0, first.Name, string(encoded))}, true
+}
+
+func newStubToolCall(index int, name, arguments string) stubToolCall {
+	call := stubToolCall{ID: fmt.Sprintf("call_stub_%d", index+1), Type: "function"}
+	call.Function.Name = name
+	call.Function.Arguments = arguments
+	return call
+}
+
+// lastQuestion returns the text after the last 「学生提问：」 marker, which is
+// where the server places the student's question (tutor-chat 消息组装).
+func lastQuestion(messages []chatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "user" {
+			continue
+		}
+		if idx := strings.LastIndex(messages[i].Content, "学生提问："); idx >= 0 {
+			return strings.TrimSpace(messages[i].Content[idx+len("学生提问："):])
+		}
+	}
+	return ""
 }
 
 // streamChat answers with the same text as SSE frames of streamPieceRunes
@@ -383,17 +501,18 @@ func materialNumbers(req *chatRequest) []int {
 }
 
 type statsResponse struct {
-	Dim                  int             `json:"dim"`
-	EmbeddingCalls       int             `json:"embedding_calls"`
-	ChatCalls            int             `json:"chat_calls"`
-	LastEmbeddingRequest json.RawMessage `json:"last_embedding_request"`
-	LastChatRequest      json.RawMessage `json:"last_chat_request"`
-	EmbedFail            bool            `json:"embed_fail"`
-	ChatFail             bool            `json:"chat_fail"`
-	OutOfRangeCitation   bool            `json:"out_of_range_citation"`
-	FailBeforeFirstDelta bool            `json:"fail_before_first_delta"`
-	AbortAfterDeltas     int             `json:"abort_after_deltas"`
-	ChatText             string          `json:"chat_text"`
+	Dim                  int               `json:"dim"`
+	EmbeddingCalls       int               `json:"embedding_calls"`
+	ChatCalls            int               `json:"chat_calls"`
+	LastEmbeddingRequest json.RawMessage   `json:"last_embedding_request"`
+	LastChatRequest      json.RawMessage   `json:"last_chat_request"`
+	EmbedFail            bool              `json:"embed_fail"`
+	ChatFail             bool              `json:"chat_fail"`
+	OutOfRangeCitation   bool              `json:"out_of_range_citation"`
+	FailBeforeFirstDelta bool              `json:"fail_before_first_delta"`
+	AbortAfterDeltas     int               `json:"abort_after_deltas"`
+	ChatText             string            `json:"chat_text"`
+	ToolCalls            *[]forcedToolCall `json:"tool_calls"`
 }
 
 func (s *state) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +529,7 @@ func (s *state) handleStats(w http.ResponseWriter, r *http.Request) {
 		FailBeforeFirstDelta: s.failBeforeFirstDelta,
 		AbortAfterDeltas:     s.abortAfterDeltas,
 		ChatText:             s.chatText,
+		ToolCalls:            s.forcedToolCalls,
 	}
 	s.mu.Unlock()
 
@@ -420,12 +540,13 @@ func (s *state) handleStats(w http.ResponseWriter, r *http.Request) {
 // resetting the others. abort_after_deltas: -1 turns the abort off, 0 or more
 // aborts after that many pieces.
 type controlRequest struct {
-	EmbedFail            *bool   `json:"embed_fail"`
-	ChatFail             *bool   `json:"chat_fail"`
-	OutOfRangeCitation   *bool   `json:"out_of_range_citation"`
-	FailBeforeFirstDelta *bool   `json:"fail_before_first_delta"`
-	AbortAfterDeltas     *int    `json:"abort_after_deltas"`
-	ChatText             *string `json:"chat_text"`
+	EmbedFail            *bool             `json:"embed_fail"`
+	ChatFail             *bool             `json:"chat_fail"`
+	OutOfRangeCitation   *bool             `json:"out_of_range_citation"`
+	FailBeforeFirstDelta *bool             `json:"fail_before_first_delta"`
+	AbortAfterDeltas     *int              `json:"abort_after_deltas"`
+	ChatText             *string           `json:"chat_text"`
+	ToolCalls            *[]forcedToolCall `json:"tool_calls"`
 }
 
 func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
@@ -460,6 +581,10 @@ func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
 	if req.ChatText != nil {
 		s.chatText = *req.ChatText
 	}
+	if req.ToolCalls != nil {
+		calls := append([]forcedToolCall(nil), (*req.ToolCalls)...)
+		s.forcedToolCalls = &calls
+	}
 	resp := map[string]any{
 		"embed_fail":              s.embedFail,
 		"chat_fail":               s.chatFail,
@@ -467,6 +592,7 @@ func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
 		"fail_before_first_delta": s.failBeforeFirstDelta,
 		"abort_after_deltas":      s.abortAfterDeltas,
 		"chat_text":               s.chatText,
+		"tool_calls":              s.forcedToolCalls,
 	}
 	s.mu.Unlock()
 

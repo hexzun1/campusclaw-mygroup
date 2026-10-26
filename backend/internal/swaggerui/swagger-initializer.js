@@ -4,7 +4,7 @@
 // that logo, so the page satisfies the CSP unchanged.
 window.onload = function () {
   window.ui = SwaggerUIBundle({
-    url: "./doc.json",
+    url: "/openapi.json",
     dom_id: "#swagger-ui",
     deepLinking: true,
     presets: [SwaggerUIBundle.presets.apis],

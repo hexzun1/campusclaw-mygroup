@@ -51,6 +51,14 @@ type Config struct {
 
 	GatewayTimeout time.Duration
 	IndexTimeout   time.Duration
+
+	// MCP (design.md Decision 14). MCP_AUTH_TOKEN is optional: the api only
+	// needs it to seed campus-tools; mcp-demo requires it itself.
+	MCPAuthToken        string
+	MCPConnectTimeout   time.Duration
+	MCPCallTimeout      time.Duration
+	MCPToolStageTimeout time.Duration
+	MCPMaxResponseBytes int64
 }
 
 const (
@@ -69,6 +77,11 @@ const (
 	defaultEmbeddingBatchSize = 32
 	defaultGatewayTimeoutSec  = 30
 	defaultIndexTimeoutSec    = 120
+
+	defaultMCPConnectTimeout   = 5 * time.Second
+	defaultMCPCallTimeout      = 10 * time.Second
+	defaultMCPToolStageTimeout = 20 * time.Second
+	defaultMCPMaxResponseBytes = 256 * 1024
 )
 
 // required lists the environment variables that MUST be set. Missing any of
@@ -114,6 +127,23 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	mcpConnectTimeout, err := positiveDuration("MCP_CONNECT_TIMEOUT", defaultMCPConnectTimeout)
+	if err != nil {
+		return nil, err
+	}
+	mcpCallTimeout, err := positiveDuration("MCP_CALL_TIMEOUT", defaultMCPCallTimeout)
+	if err != nil {
+		return nil, err
+	}
+	mcpToolStageTimeout, err := positiveDuration("MCP_TOOL_STAGE_TIMEOUT", defaultMCPToolStageTimeout)
+	if err != nil {
+		return nil, err
+	}
+	mcpMaxResponseBytes, err := positiveInt64("MCP_MAX_RESPONSE_BYTES", defaultMCPMaxResponseBytes)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		JWTSecret: os.Getenv("JWT_SECRET"),
 		JWTTTL:    durationOrDefault("JWT_TTL", defaultJWTTTL),
@@ -152,6 +182,12 @@ func Load() (*Config, error) {
 
 		GatewayTimeout: secondsOrDefault("GATEWAY_TIMEOUT_SECONDS", defaultGatewayTimeoutSec),
 		IndexTimeout:   secondsOrDefault("INDEX_TIMEOUT_SECONDS", defaultIndexTimeoutSec),
+
+		MCPAuthToken:        os.Getenv("MCP_AUTH_TOKEN"),
+		MCPConnectTimeout:   mcpConnectTimeout,
+		MCPCallTimeout:      mcpCallTimeout,
+		MCPToolStageTimeout: mcpToolStageTimeout,
+		MCPMaxResponseBytes: mcpMaxResponseBytes,
 	}
 
 	// The secret is never echoed in the error: only the variable name, the
@@ -226,6 +262,34 @@ func secondsOrDefault(name string, def int) time.Duration {
 // The value is never echoed back: only the variable name and the rule.
 func positiveInt(name string) (int, error) {
 	n, err := strconv.Atoi(os.Getenv(name))
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s is invalid: must be a positive integer", name)
+	}
+	return n, nil
+}
+
+// positiveDuration reads an optional duration such as "5s" or "200ms".
+// A malformed or non-positive value is fatal instead of falling back to the
+// default, so a typo cannot silently change the MCP timeouts.
+func positiveDuration(name string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%s is invalid: must be a positive duration such as 5s", name)
+	}
+	return d, nil
+}
+
+// positiveInt64 reads an optional positive integer such as a byte limit.
+func positiveInt64(name string, def int64) (int64, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("%s is invalid: must be a positive integer", name)
 	}

@@ -20,3 +20,10 @@ backend/*.exe
 # 本地工具目录
 .agents/
 .qoder/
+
+# 接口测试
+apitest/reports/
+apitest/.env
+__pycache__/
+.pytest_cache/
+.venv/

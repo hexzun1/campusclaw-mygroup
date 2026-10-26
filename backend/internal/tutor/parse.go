@@ -7,7 +7,9 @@
 package tutor
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -20,11 +22,19 @@ const (
 	maxTriggerRunes   = 120
 	maxSubjectRunes   = 32
 	maxBodyRunes      = 2000
+	maxSkillTools     = 3
 )
 
-// toolKnowledgeSearch is the only tool value a skill file may declare. It is
-// validated and displayed, never sent to the gateway as a tool definition.
+// toolKnowledgeSearch is the built-in search tool a skill may name directly.
+// It is validated and displayed, never sent to the gateway as a tool
+// definition; only MCP references become function definitions (design.md
+// Decision 7).
 const toolKnowledgeSearch = "knowledge_search"
+
+var (
+	mcpRefToolNameRE   = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	mcpRefServerNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+)
 
 // skillFieldNames lists the fields a key line may define.
 var skillFieldNames = []string{"名称", "适用条件", "资料", "工具", "启用"}
@@ -105,12 +115,17 @@ func ParseSkill(text string) (db.Skill, error) {
 		return db.Skill{}, fmt.Errorf("字段“资料”不能超过 %d 个字符", maxSubjectRunes)
 	}
 
-	tools := []byte("[]")
+	tools := []string{}
 	if v, ok := fields["工具"]; ok {
-		if v != toolKnowledgeSearch {
-			return db.Skill{}, fmt.Errorf("字段“工具”只能是 %s", toolKnowledgeSearch)
+		parsed, err := parseSkillTools(v)
+		if err != nil {
+			return db.Skill{}, err
 		}
-		tools = []byte(`["knowledge_search"]`)
+		tools = parsed
+	}
+	toolsJSON, err := json.Marshal(tools)
+	if err != nil {
+		return db.Skill{}, fmt.Errorf("字段“工具”无法保存：%v", err)
 	}
 
 	enabledText, err := requiredSkillField(fields, "启用")
@@ -131,11 +146,53 @@ func ParseSkill(text string) (db.Skill, error) {
 		Name:        name,
 		TriggerText: trigger,
 		SubjectText: subject,
-		ToolsJSON:   tools,
+		ToolsJSON:   toolsJSON,
 		Description: body,
 		SourceText:  text,
 		Enabled:     enabled,
 	}, nil
+}
+
+// parseSkillTools parses the 工具 field: 1–3 comma-separated values, each
+// either knowledge_search or a `tool@server` MCP reference. Commas may be
+// full-width or half-width. Values keep the order given (design.md Decision 4).
+func parseSkillTools(raw string) ([]string, error) {
+	parts := strings.Split(strings.ReplaceAll(raw, "，", ","), ",")
+	if len(parts) > maxSkillTools {
+		return nil, fmt.Errorf("字段“工具”最多只能有 %d 个取值，实际给了 %d 个：%s",
+			maxSkillTools, len(parts), strings.TrimSpace(raw))
+	}
+	seen := make(map[string]bool, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value != toolKnowledgeSearch {
+			if _, _, ok := splitMCPToolRef(value); !ok {
+				return nil, fmt.Errorf(
+					"字段“工具”只能是 %s 或“工具名@服务器名”，取值“%s”不合法",
+					toolKnowledgeSearch, value)
+			}
+		}
+		if seen[value] {
+			return nil, fmt.Errorf("字段“工具”的取值“%s”重复", value)
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out, nil
+}
+
+// splitMCPToolRef splits a `tool@server` reference and checks both halves
+// against the name patterns shared by mcp-server, registration and discovery.
+func splitMCPToolRef(value string) (tool, server string, ok bool) {
+	if strings.Count(value, "@") != 1 {
+		return "", "", false
+	}
+	tool, server, _ = strings.Cut(value, "@")
+	if !mcpRefToolNameRE.MatchString(tool) || !mcpRefServerNameRE.MatchString(server) {
+		return "", "", false
+	}
+	return tool, server, true
 }
 
 // splitKeyLine splits a key line at its first full-width or half-width colon.

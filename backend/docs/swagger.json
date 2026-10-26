@@ -415,7 +415,7 @@
                         "BearerAuth": []
                     }
                 ],
-                "description": "以 SSE 返回一次作答。事件序列：meta（status、skill 与 citations）→ delta…（正文增量，拼接后即整段正文）→ done（message_id）；中途失败时在已推送部分之后给出 error。第一段正文之前的一切失败都是普通 JSON 错误。同一会话同时只允许一次生成，并发提问得到 409。响应头为 text/event-stream、Cache-Control: no-cache。",
+                "description": "以 SSE 返回一次作答。事件序列：meta（status、skill、citations，本轮涉及 MCP 工具时另有 tool_calls）→ delta…（正文增量，拼接后即整段正文）→ done（message_id）；中途失败时在已推送部分之后给出 error。第一段正文之前的一切失败都是普通 JSON 错误。同一会话同时只允许一次生成，并发提问得到 409。响应头为 text/event-stream、Cache-Control: no-cache。",
                 "consumes": [
                     "application/json"
                 ],
@@ -912,6 +912,419 @@
                 }
             }
         },
+        "/api/mcp/calls": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "仅教师；按时间倒序返回本班记录，limit 缺省 50、范围 1–200。每条的 tool 为合并后的「工具名@服务器名」，不含参数与结果原文。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "MCP"
+                ],
+                "summary": "本班 MCP 调用审计",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "条数，缺省 50，范围 1–200",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/campusclaw_backend_internal_db.MCPToolCall"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "limit 越界",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "仅教师可查看",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/mcp/servers": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "列出本班已登记的 MCP 工具服务器；响应不含令牌，只给出 has_token。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "MCP"
+                ],
+                "summary": "工具服务器列表",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/campusclaw_backend_internal_db.MCPServer"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "仅教师可管理",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "仅教师。令牌只写不读：响应与错误信息都不含令牌原文。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "MCP"
+                ],
+                "summary": "登记工具服务器",
+                "parameters": [
+                    {
+                        "description": "name（^[a-z][a-z0-9-]{0,31}$）、base_url（http/https、不含账号口令、不以 /mcp 结尾）、token（1–512）",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/MCPServerRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/campusclaw_backend_internal_db.MCPServer"
+                        }
+                    },
+                    "400": {
+                        "description": "名称、地址或令牌不合法",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "仅教师可管理",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "409": {
+                        "description": "同名服务器已存在",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/mcp/servers/{id}": {
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "MCP"
+                ],
+                "summary": "删除工具服务器",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "服务器编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "已删除"
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "仅教师可管理",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "记录不存在",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "409": {
+                        "description": "仍被技能引用",
+                        "schema": {
+                            "$ref": "#/definitions/MCPServerDeleteConflict"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/mcp/servers/{id}/connect": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "完整握手后整体替换工具缓存；失败返回 502，服务器状态置为 error 且清空缓存。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "MCP"
+                ],
+                "summary": "连接并发现工具",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "服务器编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "发现到的工具",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/campusclaw_backend_internal_db.MCPTool"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "仅教师可管理",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "记录不存在",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "502": {
+                        "description": "无法连接或令牌被拒绝",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/mcp/servers/{id}/disconnect": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "清空工具缓存并把状态置为 disconnected。",
+                "tags": [
+                    "MCP"
+                ],
+                "summary": "断开工具服务器",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "服务器编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "已断开"
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "仅教师可管理",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "记录不存在",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/mcp/servers/{id}/tools": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "返回上一次连接成功时缓存的工具清单；未连接时为空数组。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "MCP"
+                ],
+                "summary": "查看已发现的工具",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "服务器编号",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/campusclaw_backend_internal_db.MCPTool"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "未登录或会话已失效",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "403": {
+                        "description": "仅教师可管理",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "404": {
+                        "description": "记录不存在",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    },
+                    "503": {
+                        "description": "服务暂不可用",
+                        "schema": {
+                            "$ref": "#/definitions/ErrorBody"
+                        }
+                    }
+                }
+            }
+        },
         "/api/me": {
             "get": {
                 "security": [
@@ -1384,6 +1797,34 @@
                 }
             }
         },
+        "MCPServerDeleteConflict": {
+            "type": "object",
+            "properties": {
+                "error": {
+                    "type": "string"
+                },
+                "skills": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "MCPServerRequest": {
+            "type": "object",
+            "properties": {
+                "base_url": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "token": {
+                    "type": "string"
+                }
+            }
+        },
         "SearchHit": {
             "type": "object",
             "properties": {
@@ -1495,6 +1936,84 @@
                     "type": "string"
                 },
                 "skill_name": {
+                    "type": "string"
+                }
+            }
+        },
+        "campusclaw_backend_internal_db.MCPServer": {
+            "type": "object",
+            "properties": {
+                "base_url": {
+                    "type": "string"
+                },
+                "has_token": {
+                    "type": "boolean"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "last_error": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "tool_count": {
+                    "type": "integer"
+                },
+                "tools_refreshed_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "campusclaw_backend_internal_db.MCPTool": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string"
+                },
+                "input_schema": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "campusclaw_backend_internal_db.MCPToolCall": {
+            "type": "object",
+            "properties": {
+                "conversation_id": {
+                    "type": "integer"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "duration_ms": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "round": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "tool": {
+                    "type": "string"
+                },
+                "username": {
                     "type": "string"
                 }
             }

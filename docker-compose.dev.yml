@@ -9,7 +9,7 @@ services:
       MYSQL_USER: ${DB_USER}
       MYSQL_PASSWORD: ${DB_PASSWORD}
     ports:
-      - "127.0.0.1:3306:3306"
+      - "127.0.0.1:3307:3306"
     volumes:
       - dbdata:/var/lib/mysql
       - ./backend/migrations:/docker-entrypoint-initdb.d:ro
@@ -37,6 +37,15 @@ services:
     command: ["go", "run", "./cmd/stubgateway", "-addr", ":8090"]
     environment:
       EMBEDDING_DIM: ${EMBEDDING_DIM:-256}
+    ports:
+      - "127.0.0.1:8091:8090"
+
+  # 与正式编排同名的自建 MCP 示例服务器；宿主绑定 8090，令牌由 .env 注入。
+  mcp-demo:
+    build:
+      context: ./mcp-server
+    environment:
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN}
     ports:
       - "127.0.0.1:8090:8090"
 

@@ -36,6 +36,9 @@ type Handlers struct {
 	// Retriever and Chat serve the streaming ask endpoint only.
 	Retriever MaterialRetriever
 	Chat      StreamChatter
+	// Tools runs the MCP tool stage. Nil means no tool support (tests that do
+	// not exercise it), and the turn behaves exactly like iteration 3.
+	Tools *ToolStage
 
 	// locks serialises answer generation per conversation: a question asked
 	// while the previous answer is still being generated answers 409
@@ -44,8 +47,8 @@ type Handlers struct {
 	locks sync.Map
 }
 
-func NewHandlers(conn *sql.DB, retriever MaterialRetriever, chat StreamChatter) *Handlers {
-	return &Handlers{Conn: conn, Retriever: retriever, Chat: chat}
+func NewHandlers(conn *sql.DB, retriever MaterialRetriever, chat StreamChatter, tools *ToolStage) *Handlers {
+	return &Handlers{Conn: conn, Retriever: retriever, Chat: chat, Tools: tools}
 }
 
 // lockFor returns the generation lock of one conversation, creating it on

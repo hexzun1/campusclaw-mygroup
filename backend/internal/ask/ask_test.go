@@ -145,8 +145,8 @@ func TestBuildMessagesDropsClientInstruction(t *testing.T) {
 			t.Fatalf("system message is missing material block %q:\n%s", block, messages[0].Content)
 		}
 	}
-	if messages[1] != (gateway.ChatMessage{Role: gateway.RoleUser, Content: "上一个问题"}) ||
-		messages[2] != (gateway.ChatMessage{Role: gateway.RoleAssistant, Content: "上一个回答"}) {
+	if messages[1].Role != gateway.RoleUser || messages[1].Content != "上一个问题" ||
+		messages[2].Role != gateway.RoleAssistant || messages[2].Content != "上一个回答" {
 		t.Fatalf("history not forwarded in order: %+v", messages[1:3])
 	}
 	if last := messages[len(messages)-1]; last.Role != gateway.RoleUser || last.Content != "当前问题" {

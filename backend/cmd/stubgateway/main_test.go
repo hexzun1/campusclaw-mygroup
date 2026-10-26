@@ -315,3 +315,125 @@ func TestEmbeddingsEndpointRejectsMalformedInput(t *testing.T) {
 		}
 	}
 }
+
+// stubReply decodes the non-streamed completion including tool_calls.
+type stubReply struct {
+	Choices []struct {
+		Message struct {
+			Role      string         `json:"role"`
+			Content   string         `json:"content"`
+			ToolCalls []stubToolCall `json:"tool_calls"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+}
+
+func decodeStubReply(t *testing.T, resp *http.Response) stubReply {
+	t.Helper()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var reply stubReply
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(reply.Choices) != 1 {
+		t.Fatalf("choices = %d, want 1", len(reply.Choices))
+	}
+	return reply
+}
+
+const toolTurnBody = `{"model":"stub","messages":[
+	{"role":"system","content":"系统"},
+	{"role":"user","content":"学生提问：勾股定理怎么用"}],
+	"tools":[{"type":"function","function":{"name":"formula_hint__campus-tools","description":"提示","parameters":{
+		"type":"object","required":["topic","count","confirmed"],
+		"properties":{"topic":{"type":"string"},"count":{"type":"number"},"confirmed":{"type":"boolean"}}}}}]}`
+
+func TestStubToolCallsFirstToolOnFirstTurn(t *testing.T) {
+	srv := newTestServer(16)
+	defer srv.Close()
+
+	reply := decodeStubReply(t, postJSON(t, srv.URL+"/chat/completions", toolTurnBody))
+	choice := reply.Choices[0]
+	if choice.FinishReason != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls", choice.FinishReason)
+	}
+	if choice.Message.Content != "" {
+		t.Errorf("content = %q, want empty while calling tools", choice.Message.Content)
+	}
+	if len(choice.Message.ToolCalls) != 1 {
+		t.Fatalf("tool_calls = %+v, want one", choice.Message.ToolCalls)
+	}
+	call := choice.Message.ToolCalls[0]
+	if call.Function.Name != "formula_hint__campus-tools" {
+		t.Errorf("name = %q, want the first declared tool", call.Function.Name)
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		t.Fatalf("arguments %q are not JSON: %v", call.Function.Arguments, err)
+	}
+	if args["topic"] != "勾股定理怎么用" {
+		t.Errorf("topic = %v, want the last question", args["topic"])
+	}
+	if args["count"] != float64(1) {
+		t.Errorf("count = %v, want 1 for a number", args["count"])
+	}
+	if args["confirmed"] != true {
+		t.Errorf("confirmed = %v, want true for a boolean", args["confirmed"])
+	}
+	if call.ID == "" {
+		t.Error("the stub call has no id")
+	}
+}
+
+func TestStubToolCallsAnswersAfterToolMessage(t *testing.T) {
+	srv := newTestServer(16)
+	defer srv.Close()
+
+	body := strings.Replace(toolTurnBody, `"messages":[`,
+		`"messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"formula_hint__campus-tools","arguments":"{}"}}]},{"role":"tool","content":"提示","tool_call_id":"call_1"},`, 1)
+	reply := decodeStubReply(t, postJSON(t, srv.URL+"/chat/completions", body))
+	choice := reply.Choices[0]
+	if len(choice.Message.ToolCalls) != 0 {
+		t.Fatalf("tool_calls = %+v, want none once a tool message exists", choice.Message.ToolCalls)
+	}
+	if choice.FinishReason != "stop" || choice.Message.Content == "" {
+		t.Errorf("finish_reason = %q content = %q, want a text answer", choice.FinishReason, choice.Message.Content)
+	}
+}
+
+func TestStubToolCallsHonorsControl(t *testing.T) {
+	srv := newTestServer(16)
+	defer srv.Close()
+
+	control := `{"tool_calls":[
+		{"name":"formula_hint__campus-tools","arguments":"{\"topic\":\"勾股定理\"}"},
+		{"name":"web_search__campus-tools","arguments":"{not json"}]}`
+	if resp := postJSON(t, srv.URL+"/control", control); resp.StatusCode != http.StatusOK {
+		t.Fatalf("control status = %d, want 200", resp.StatusCode)
+	}
+
+	reply := decodeStubReply(t, postJSON(t, srv.URL+"/chat/completions", toolTurnBody))
+	calls := reply.Choices[0].Message.ToolCalls
+	if len(calls) != 2 {
+		t.Fatalf("tool_calls = %+v, want the two controlled calls", calls)
+	}
+	if calls[0].Function.Name != "formula_hint__campus-tools" || calls[0].Function.Arguments != `{"topic":"勾股定理"}` {
+		t.Errorf("calls[0] = %+v", calls[0])
+	}
+	// The stub is a test double: it must be able to emit an unauthorized name
+	// and malformed arguments so the host can reject them.
+	if calls[1].Function.Name != "web_search__campus-tools" || calls[1].Function.Arguments != "{not json" {
+		t.Errorf("calls[1] = %+v", calls[1])
+	}
+	if calls[0].ID == calls[1].ID {
+		t.Errorf("call ids must differ: %+v", calls)
+	}
+
+	postJSON(t, srv.URL+"/control", `{"tool_calls":[]}`)
+	reply = decodeStubReply(t, postJSON(t, srv.URL+"/chat/completions", toolTurnBody))
+	if got := reply.Choices[0].Message.ToolCalls; len(got) != 0 {
+		t.Errorf("an empty control list must mean answer without calls, got %+v", got)
+	}
+}

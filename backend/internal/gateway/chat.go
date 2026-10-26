@@ -22,10 +22,14 @@ type ChatConfig struct {
 	Timeout time.Duration
 }
 
-// ChatMessage is one OpenAI-compatible message.
+// ChatMessage is one OpenAI-compatible message. ToolCalls is set on the
+// assistant message that requested calls and ToolCallID on the matching tool
+// result; neither field is ever populated from client input.
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 // Roles accepted on the wire. The server builds its own system message and
@@ -34,7 +38,43 @@ const (
 	RoleSystem    = "system"
 	RoleUser      = "user"
 	RoleAssistant = "assistant"
+	RoleTool      = "tool"
 )
+
+// ToolDefinition declares one tool as an OpenAI-compatible function. Name is
+// the host's `tool__server` mapping, never the raw `tool@server` reference
+// (design.md Decision 3).
+type ToolDefinition struct {
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction is the declaration part of a ToolDefinition.
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// ToolCall is one function call the model asked for. Arguments stays a raw
+// string so the host can reject malformed JSON instead of trusting it.
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type,omitempty"`
+	Function ToolCallFunction `json:"function"`
+}
+
+// ToolCallFunction names the requested function and carries its raw arguments.
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// AssistantMessage is the non-streamed reply of the tool stage.
+type AssistantMessage struct {
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+}
 
 // ChatClient asks the chat gateway for an answer, streamed or complete.
 type ChatClient struct {
@@ -91,6 +131,39 @@ func (c *ChatClient) Chat(ctx context.Context, messages []ChatMessage) (string, 
 		return "", upstream.Unavailable("the chat gateway returned no choices", nil)
 	}
 	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
+// ChatWithTools runs one non-streamed tool-stage exchange: the messages plus
+// function declarations, tool_choice auto. The reply may carry tool_calls
+// instead of (or in addition to) text; arguments are returned verbatim for the
+// host to validate (design.md Decision 8).
+func (c *ChatClient) ChatWithTools(ctx context.Context, messages []ChatMessage, tools []ToolDefinition) (AssistantMessage, error) {
+	if len(messages) == 0 {
+		return AssistantMessage{}, upstream.Unavailable("the chat request has no messages", nil)
+	}
+	if len(tools) == 0 {
+		return AssistantMessage{}, upstream.Unavailable("the tool request has no tools", nil)
+	}
+
+	var resp chatResponse
+	payload := map[string]any{
+		"model":       c.client.Model(),
+		"messages":    messages,
+		"stream":      false,
+		"tools":       tools,
+		"tool_choice": "auto",
+	}
+	if err := c.client.post(ctx, "/chat/completions", payload, &resp); err != nil {
+		return AssistantMessage{}, err
+	}
+	if len(resp.Choices) == 0 {
+		return AssistantMessage{}, upstream.Unavailable("the chat gateway returned no choices", nil)
+	}
+	message := resp.Choices[0].Message
+	return AssistantMessage{
+		Content:   strings.TrimSpace(message.Content),
+		ToolCalls: message.ToolCalls,
+	}, nil
 }
 
 // StreamChat asks for a streamed answer (stream:true) and calls onDelta for

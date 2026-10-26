@@ -73,9 +73,13 @@ export function clearToken(): void {
 
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  // skills is set by a 409 from DELETE /api/mcp/servers/{id}: the skills that
+  // still reference the server.
+  skills?: string[]
+  constructor(status: number, message: string, skills?: string[]) {
     super(message)
     this.status = status
+    this.skills = skills
   }
 }
 
@@ -102,14 +106,14 @@ async function request<T>(path: string, options: RequestInit = {}, withAuth = tr
 
   if (!res.ok) {
     const body = await safeJson(res)
-    throw new ApiError(res.status, body?.error ?? `请求失败（${res.status}）`)
+    throw new ApiError(res.status, body?.error ?? `请求失败（${res.status}）`, body?.skills)
   }
 
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }
 
-async function safeJson(res: Response): Promise<{ error?: string } | null> {
+async function safeJson(res: Response): Promise<{ error?: string; skills?: string[] } | null> {
   try {
     return await res.json()
   } catch {
@@ -372,10 +376,89 @@ export function getConversation(id: number) {
   return request<ConversationDetail>(`/api/conversations/${id}`)
 }
 
+// --- MCP tool servers and the call audit ---
+
+export type MCPServerStatus = 'disconnected' | 'connected' | 'error'
+
+// MCPServer never carries the token: has_token is the only signal.
+export interface MCPServer {
+  id: number
+  name: string
+  base_url: string
+  has_token: boolean
+  status: MCPServerStatus
+  tool_count: number
+  last_error: string
+  tools_refreshed_at: string | null
+}
+
+export interface MCPTool {
+  name: string
+  description: string
+  // Raw JSON Schema; the page renders it as formatted plain text.
+  input_schema: unknown
+}
+
+export interface MCPToolCall {
+  id: number
+  /** 合并后的 `工具名@服务器名`，与 meta.tool_calls 的写法一致。 */
+  tool: string
+  status: 'ok' | 'error' | 'denied'
+  reason?: string
+  username: string
+  conversation_id: number
+  round: number
+  duration_ms: number
+  created_at: string
+}
+
+// ToolCallSummary is the meta projection: status and identifiers only, never
+// arguments or result text.
+export interface ToolCallSummary {
+  tool: string
+  status: 'ok' | 'error' | 'denied'
+  reason?: string
+  round: number
+  duration_ms: number
+}
+
+export function listMCPServers() {
+  return request<MCPServer[]>('/api/mcp/servers')
+}
+
+export function createMCPServer(input: { name: string; base_url: string; token: string }) {
+  return request<MCPServer>('/api/mcp/servers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export function deleteMCPServer(id: number) {
+  return request<void>(`/api/mcp/servers/${id}`, { method: 'DELETE' })
+}
+
+export function connectMCPServer(id: number) {
+  return request<MCPTool[]>(`/api/mcp/servers/${id}/connect`, { method: 'POST' })
+}
+
+export function listMCPServerTools(id: number) {
+  return request<MCPTool[]>(`/api/mcp/servers/${id}/tools`)
+}
+
+export function disconnectMCPServer(id: number) {
+  return request<void>(`/api/mcp/servers/${id}/disconnect`, { method: 'POST' })
+}
+
+export function listMCPCalls(limit = 50) {
+  return request<MCPToolCall[]>(`/api/mcp/calls?limit=${limit}`)
+}
+
 export interface StreamMeta {
   status: string
   skill: string | null
   citations: Hit[]
+  tool_calls?: ToolCallSummary[]
 }
 
 export interface StreamHandlers {

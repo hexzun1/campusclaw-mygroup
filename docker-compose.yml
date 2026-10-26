@@ -26,6 +26,16 @@ services:
       - qdrantdata:/qdrant/storage
     restart: unless-stopped
 
+  # 自建 MCP 示例服务器。令牌只在运行时注入，镜像层不含任何令牌。
+  mcp-demo:
+    build:
+      context: ./mcp-server
+    environment:
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN}
+    ports:
+      - "127.0.0.1:8090:8090"
+    restart: unless-stopped
+
   api:
     build:
       context: ./backend

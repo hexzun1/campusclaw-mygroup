@@ -26,6 +26,7 @@ type Config struct {
 	StudentA1Password string
 	StudentB1Password string
 	UploadDir         string
+	MCPAuthToken      string
 }
 
 const (
@@ -85,6 +86,12 @@ func Run(ctx context.Context, conn *sql.DB, cfg Config) error {
 
 	if err := ensureTutorData(ctx, conn, classA.ID, classB.ID); err != nil {
 		return fmt.Errorf("ensure tutor data: %w", err)
+	}
+
+	if cfg.MCPAuthToken != "" {
+		if err := ensureMCPServer(ctx, conn, classA.ID, teacherA.ID, cfg.MCPAuthToken); err != nil {
+			return fmt.Errorf("ensure mcp server: %w", err)
+		}
 	}
 
 	return nil

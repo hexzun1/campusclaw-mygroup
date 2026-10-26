@@ -2,7 +2,7 @@
 
 - **价值**：面向中小学的教研智能体，把分散在群文件与网盘里的教学材料集中进按班级隔离的知识库，让班内成员能按内容检索，并获得带材料出处的回答。
 - **场景**：教师登录后上传并管理本班教学材料；学生登录后只读查看、下载并检索本班材料，也可向本班知识库提问；不同班级之间数据互不可见。
-- **本学期不做**：作业流程、注册与找回密码、OAuth/SSO、平台超级管理员、跨班检索、重排序、由模型自主选择技能与真实工具调用（MCP）、跨班共享智能体或技能、会话删除与重命名、PDF/Word 解析、公网部署与多副本高可用。
+- **本学期不做**：作业流程、注册与找回密码、OAuth/SSO、平台超级管理员、跨班检索、重排序、由模型自主选择技能（技能仍按「适用条件」路由）、跨班共享智能体或技能、会话删除与重命名、PDF/Word 解析、公网部署与多副本高可用。
 
 ## 当前迭代
 
@@ -10,6 +10,7 @@
 - 迭代 2（v0.2.0-vector-retrieval）：正文切片与向量索引、班级内检索（关键词 / 向量 / 混合）、带引用的问答。规约见 `openspec/changes/add-traceable-vector-retrieval/`。
 - 迭代 3（v0.3.0-knowledge-qa-ui）：新增「知识检索」与「知识问答」两个前端页面（三种检索模式、带出处的回答卡片、每题独立且不保存历史）。规约见 `openspec/changes/add-knowledge-qa-ui/`。
 - 迭代 4（v0.4.0-tutor-agents-skills-streaming）：教师可配置的智能体与技能、按「适用条件」命中的技能路由、带最近历史与出处的流式助手会话（SSE），以及 `/swagger/` 接口文档；JWT 载荷精简为 `sub`/`jti`/`iat`/`exp`/`iss`，改库角色与班级下一次请求即生效，发布后所有旧 token 失效需重新登录。规约见 `openspec/changes/add-tutor-agents-skills-streaming/`。
+- 迭代 5（v0.5.0-mcp-tools-and-api-tests）：教师登记并连接外部 MCP 工具服务器，审阅工具后绑定到技能；助手命中技能时在宿主校验与分班授权下调用工具，并留下不含参数与结果的审计；新增按 URL 组织、可一键运行并回查数据库的接口测试 `apitest/` 与 `/openapi.json`。规约见 `openspec/changes/add-mcp-tools-and-api-tests/`。
 
 - 技术栈：React + TypeScript + Vite（前端）/ Go net/http（后端）/ MySQL 8.0 / Qdrant 向量库 / Nginx / Docker Compose
 - 部署形态：单实例 Docker Compose，只暴露 web 端口（默认 8080）
@@ -22,6 +23,7 @@
 ```bash
 cp .env.example .env
 # 编辑 .env：JWT_SECRET（至少 32 个字符）/ DB_PASSWORD / MYSQL_ROOT_PASSWORD / SEED_*_PASSWORD，
+# MCP_AUTH_TOKEN（api 与 mcp-demo 共用，留空则 mcp-demo 不启动、campus-tools 不预置），
 # 以及迭代 2 的外部服务：QDRANT_URL、EMBEDDING_BASE_URL/API_KEY/MODEL/DIM、
 # CHAT_BASE_URL/API_KEY/MODEL（填你的真实网关地址与密钥；Qdrant 在 Compose 内固定为
 # http://qdrant:6333，无需修改）
@@ -30,8 +32,8 @@ docker compose up --build -d
 
 - 登录地址：http://localhost:8080 （`WEB_PORT` 未设置时默认 8080；被占用可在 `.env` 中修改 `WEB_PORT`）
 - 健康检查：http://localhost:8080/health → `{"status":"ok"}`，无需登录
-- 接口文档：http://localhost:8080/swagger/ （开发编排下为 http://localhost:8081/swagger/；无需登录，可点「Authorize」填入 `Bearer <token>` 试调接口）
-- 共四个服务：web、api、db、qdrant。只有 web 映射宿主端口；db（3306）与 qdrant（6333/6334）只在 Compose 网络内可达
+- 接口文档：http://localhost:8080/swagger/ （开发编排下为 http://localhost:8081/swagger/；无需登录，可点「Authorize」填入 `Bearer <token>` 试调接口）；Swagger UI 读取的是同一份 OpenAPI 3 文档 `GET /openapi.json`（无需认证，不含密钥）
+- 共五个服务：web、api、db、qdrant、mcp-demo。只有 web 映射宿主端口；db（3306）与 qdrant（6333/6334）只在 Compose 网络内可达，mcp-demo（8090）只绑 `127.0.0.1` 供本机自查
 
 ### 本地开发：不接真实模型（确定性网关桩）
 
@@ -41,13 +43,13 @@ docker compose up --build -d
 docker compose -f docker-compose.dev.yml up -d
 ```
 
-- 端口只绑 `127.0.0.1`：api → 8081、db → 3306、qdrant → 6333、网关桩 → 8090
+- 端口只绑 `127.0.0.1`：api → 8081、db → 3307、qdrant → 6333、网关桩 → 8091、`mcp-demo` → 8090
 - 网关桩（源码在 `backend/cmd/stubgateway`）是确定性实现：`/embeddings` 把字符二元组哈希成 `EMBEDDING_DIM` 维向量；`/chat/completions` 回显服务端给出的资料编号（流式请求把回答按每 3 字一段返回）；`GET /stats` 查看两个接口的调用计数、最近一次请求体与当前开关；`POST /control` 可逐个切换开关（未提到的保持不变）：`{"embed_fail":true}` 嵌入失败、`{"chat_fail":true}` 对话失败（流式与非流式都失败）、`{"out_of_range_citation":true}` 回答多带一个越界引用 `[9]`、`{"fail_before_first_delta":true}` 流式回答在首段之前失败、`{"abort_after_deltas":2}` 推 2 段后断开（`-1` 关闭）、`{"chat_text":"..."}` 替换回答文字（`""` 恢复回显）
 - 用桩时把 `.env` 里的 `EMBEDDING_BASE_URL` 与 `CHAT_BASE_URL` 改为 `http://stubgateway:8090`，密钥随意；桩只存在于开发编排与源码，不进正式镜像
 
 ### 页面用法：知识检索与知识问答
 
-登录后页面顶部共有六个标签：「材料」「知识检索」「知识问答」「助手」对教师与学生相同，「智能体管理」「技能管理」仅教师可见。本节先讲「知识检索」与「知识问答」，其余见下两节。
+登录后页面顶部共有七个标签：「材料」「知识检索」「知识问答」「助手」对教师与学生相同，「智能体管理」「技能管理」「工具服务器」仅教师可见。本节先讲「知识检索」与「知识问答」，其余见下几节。
 
 - **知识检索**（`/search`）：输入问句（最长 500 字，去掉空白为空时不提交），选择模式后提交；结果按接口顺序逐条给出材料标题、切片序号、字符区间与摘录。三种模式：
   - 混合（`hybrid`，默认）：关键词与向量两路各取候选、融合排序；
@@ -59,9 +61,10 @@ docker compose -f docker-compose.dev.yml up -d
 
 ### 页面用法：助手与教师管理页
 
-- **助手**（`/assistant`）：左侧是本人会话列表（按最近更新倒序）与「新建会话」（下拉只列本班已启用的智能体，会话创建后锁定所选智能体）；提问后回答**逐段出现**，完成后显示本轮命中的技能名与按 `[1]`、`[2]` 排列的出处（材料标题、切片序号、字符区间、摘录），点开出处可查看对应材料详情。与知识问答不同，助手会话**保存历史**（重开会话可见此前各轮问答与出处），且**检索落空也会调用模型作答**（此时无出处，回答中的 `[n]` 标注会被服务端剥掉）。同一会话同一时间只能生成一条回答，生成中重复提交会收到 409 文案；回答中断（生成失败或连接断开）时已显示的文字保留并提示。
+- **助手**（`/assistant`）：左侧是本人会话列表（按最近更新倒序）与「新建会话」（下拉只列本班已启用的智能体，会话创建后锁定所选智能体）；提问后回答**逐段出现**，完成后显示本轮命中的技能名与按 `[1]`、`[2]` 排列的出处（材料标题、切片序号、字符区间、摘录），点开出处可查看对应材料详情。本轮调用了 MCP 工具时，回答上方还会出现 `工具名@服务器名` 小标签（`ok` / `denied` / `error`），被拒与失败使用醒目样式。与知识问答不同，助手会话**保存历史**（重开会话可见此前各轮问答与出处），且**检索落空也会调用模型作答**（此时无出处，回答中的 `[n]` 标注会被服务端剥掉）。同一会话同一时间只能生成一条回答，生成中重复提交会收到 409 文案；回答中断（生成失败或连接断开）时已显示的文字保留并提示。
 - **智能体管理**（`/admin/agents`，教师）：新建 / 编辑智能体的名称、提示词、启用状态，并勾选绑定的技能与材料；保存同名时显示服务端 400 文案。
 - **技能管理**（`/admin/skills`，教师）：粘贴或选择技能文件创建技能、编辑启用状态、删除（有确认）；文件不合规时页面原样显示服务端的错误原文（含行号或字段名）。
+- **工具服务器**（`/admin/mcp`，教师）：登记、连接、查看工具、断开与删除本班 MCP 服务器，并查看本班调用审计；连接失败时显示服务端返回的可读提示，页面任何位置都不显示令牌原文。
 
 ### 用 curl 调接口
 
@@ -153,7 +156,7 @@ curl -N -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 | 名称 | 是 | ≤ 32 字，班内唯一 |
 | 适用条件 | 是 | ≤ 120 字，按中英文逗号、顿号、分号、竖线分词；提问命中词的个数就是得分，得分最高（同分取编号较小）的技能被选中，至多一个 |
 | 资料 | 否 | ≤ 32 字；填写后本轮引用只保留标题包含该词的材料 |
-| 工具 | 否 | 只能填 `knowledge_search`；只做校验与展示，不会作为工具提供给模型 |
+| 工具 | 否 | 1–3 个引用，用全角或半角逗号分隔：`knowledge_search`（内置检索），或 `工具名@服务器名`（MCP 工具，服务器须已连接且该工具在其工具清单中）；保存时逐项校验，出错会指出具体取值 |
 | 启用 | 是 | 「是」或「否」；停用后不再参与路由 |
 
 示例（保存为 `physics-skill.txt`，可直接用上面的 curl 创建）：
@@ -183,6 +186,54 @@ curl -N -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 - 重建先删该材料的旧向量，再替换切片并按新策略重新索引；索引失败不回滚材料，受影响切片标记为 `failed`，再次重建即可恢复。
 - 切分参数不合法一律 400，且不留下任何记录或文件。
 
+## MCP 工具服务器
+
+仓库自带示例 MCP 服务器 `mcp-server/`（Compose 服务名 `mcp-demo`，容器内监听 8090，宿主为 `127.0.0.1:8090`）：只用 Go 标准库实现 JSON-RPC 2.0 与 Streamable HTTP，不引入第三方 MCP SDK。它提供两个工具：`formula_hint`（按主题给公式与解题思路提示）与 `unit_convert`（长度、质量、时间单位换算）。
+
+`api` 与 `mcp-demo` 共用 `.env` 中的 `MCP_AUTH_TOKEN`：api 用它为 A 班幂等预置 `campus-tools`，并在调用工具时放进 `Authorization: Bearer`；`mcp-demo` 以常量时间比较校验。令牌为空时 `mcp-demo` 拒绝启动，api 不预置 `campus-tools`（api 本身照常启动）。令牌只在运行时注入，不进入镜像层、接口响应或日志。
+
+```bash
+# 健康检查（无需令牌）
+curl -s http://127.0.0.1:8090/health
+# → {"status":"ok"}
+
+# 用同一个令牌列出工具（先把 .env 导入当前 shell，令牌值不要写进命令或文档）
+curl -s -X POST http://127.0.0.1:8090/mcp \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+# → {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"formula_hint",...},{"name":"unit_convert",...}]}}
+```
+
+教师使用流程：登录后进入「工具服务器」→ 登记（名称如 `campus-tools`（同班唯一），地址 `http://mcp-demo:8090`，不要以 `/mcp` 结尾）→「连接」读取工具清单 → 审阅工具说明与参数结构 → 在技能文件的「工具」字段写 `formula_hint@campus-tools` 并把技能绑到智能体。学生看不到该页面，接口仍返回 403；他班服务器与不存在的编号返回相同的 404。
+
+- 技能「工具」支持 1–3 个引用：`knowledge_search` 或 `工具名@服务器名`，引用在保存时校验（服务器属于本班、已连接、工具在缓存中、函数名不超过 64 字符）。
+- 只有本轮命中的技能含 MCP 引用时才进入工具阶段：宿主只把仍可用的工具交给模型，逐次校验工具名与参数，最多 2 轮 / 3 次调用 / 20 秒；工具失败会回传给模型而不是中断回答。
+- 每次调用（`ok` / `denied` / `error`）写入审计 `mcp_tool_calls`，只记工具、服务器、状态、原因、耗时与归属，不记参数、结果或令牌；教师可在「工具服务器」页查看，接口为 `GET /api/mcp/calls?limit=50`。
+- 服务器断开后，其工具在技能保存与运行时都立即不可用：运行中的调用记为 `denied` / `not_connected`，助手回答照常完成。
+- 接口文档：人类可读的 Swagger UI 在 `/swagger/`，机器可读的 OpenAPI 3 文档在 `GET /openapi.json`（无需认证，不含密钥）。
+
+## 接口测试（apitest）
+
+`apitest/` 用 Python 3 + `requests` + `pytest` + `pytest-html` + `pymysql` 按 URL 组织接口用例，创建类用例会回查数据库核对字段，运行前清理上次残留、运行后比对预置数据行数。
+
+```bash
+cd apitest
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env
+# 编辑 .env（只写变量值，不要提交）：开发编排下 API_BASE_URL=http://localhost:8081，
+# APITEST_DB_HOST=127.0.0.1、APITEST_DB_PORT=3307、APITEST_DB_USER/NAME，
+# 以及 APITEST_DB_PASSWORD、MCP_AUTH_TOKEN 与三个预置账号口令
+.venv/bin/python run_all.py; echo "exit=$?"
+```
+
+- 用例目录与接口路径一致（`cases/api/login/POST.py` 对应 `POST /api/login`，路径参数写成 `_id_`），跨接口流程在 `cases/e2e/`。
+- 报告生成在 `apitest/reports/report-<时间戳>.html`（单文件，可直接用浏览器打开）；退出码 0 表示全部通过，非 0 表示有失败或配置错误。
+- 缺少必需环境变量时不会开始跑用例，而是列出缺少的变量名并非零退出。
+- 依赖对话网关产出回答的用例标记为 `gateway`：网关不可用（流式接口在事件流开始前返回 503）时显示 skipped 并注明原因，不计为通过。
+- 测试数据统一使用 `apitest_<时间戳>`（MCP 服务器名受命名约束，用 `apitest-<时间戳>`），结束后自动清理；`campus-tools` 若被临时连接或断开，会在用例结束时恢复原状态。
+
 ## 预置账号
 
 | 用户名 | 角色 | 班级 | 密码 |
@@ -191,7 +242,7 @@ curl -N -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 | student_a1 | 学生 | A 班 | 来自 `.env` 的 `SEED_STUDENT_A1_PASSWORD` |
 | student_b1 | 学生 | B 班 | 来自 `.env` 的 `SEED_STUDENT_B1_PASSWORD` |
 
-首次启动会自动建表，写入以上账号与两班的示例材料（班 B 有两条，其中一条只含 B 班独有内容，用于验证跨班隔离），并为材料生成切片与向量索引；种子与索引过程幂等，重启不会重复插入或覆盖已上传内容。索引依赖不可用时种子照常完成，预置切片标记为 `failed`，重建即可恢复。除账号与材料外，种子还会为 A 班写入两份预置技能（「数学解题引导」「语文解题引导」）与每班一个已启用的默认智能体；A 班默认智能体绑定这两份技能与首次种子时已有的 A 班材料。技能与智能体的种子同样按 `seed_key` 幂等，改名或改提示词后重启不会被覆盖。
+首次启动会自动建表，写入以上账号与两班的示例材料（班 B 有两条，其中一条只含 B 班独有内容，用于验证跨班隔离），并为材料生成切片与向量索引；种子与索引过程幂等，重启不会重复插入或覆盖已上传内容。索引依赖不可用时种子照常完成，预置切片标记为 `failed`，重建即可恢复。除账号与材料外，种子还会为 A 班写入两份预置技能（「数学解题引导」「语文解题引导」）与每班一个已启用的默认智能体；A 班默认智能体绑定这两份技能与首次种子时已有的 A 班材料。技能与智能体的种子同样按 `seed_key` 幂等，改名或改提示词后重启不会被覆盖。配置了 `MCP_AUTH_TOKEN` 时，种子还会为 A 班幂等登记一台 `campus-tools` 服务器（初始 `disconnected`），按 `seed_key` 判断，重复启动不会产生第二条，也不会覆盖教师修改过的地址或连接状态。
 
 ## 已知行为与限制
 
@@ -202,7 +253,8 @@ curl -N -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 - **跨班访问**：材料相关接口（列表 / 详情 / 下载 / 重建）对不存在的 ID 与他班 ID 返回相同的 404；智能体 / 技能 / 会话同样如此（他班、他人、未启用或不存在的对象返回相同的 404）；检索与问答对他班内容返回 200 空结果（`message` 为「资料中未找到相关内容」，`hits`/`citations` 为空），不区分"不存在"与"不属于你"。
 - **检索依赖的降级**：Qdrant 或嵌入网关不可用时 `keyword` 检索仍可用（只查 MySQL 全文索引），`vector`、`hybrid` 与 `/api/ask` 返回 **503**；对话网关不可用时 `/api/ask` 返回 503。错误响应不暴露依赖地址与密钥。
 - **助手的作答与降级**：会话提问经 `POST /api/conversations/{id}/stream`（SSE）逐段返回；Qdrant / 嵌入网关 / 对话网关不可用都在流开始前返回 503 且不落助手消息；检索落空时助手仍会调用模型（与 `/api/ask` 的「无依据不调用」口径不同），超出本轮出处范围的 `[n]` 标注会在推送前被剥掉。
-- **技能路由至多命中一个**：把「适用条件」按标点分词后与提问逐词匹配，命中最多者胜出（同分取编号较小），全部零分则不命中；停用或从智能体解绑后立即不再命中；技能的「工具」字段只做校验与展示，不会作为工具提供给模型。
+- **技能路由至多命中一个**：把「适用条件」按标点分词后与提问逐词匹配，命中最多者胜出（同分取编号较小），全部零分则不命中；停用或从智能体解绑后立即不再命中。
+- **MCP 工具调用**：只有命中技能的「工具」含 `工具名@服务器名` 时才进入工具阶段；工具定义只来自该技能的引用且以当前连接缓存为准，模型提出候选集之外的工具、非法参数或超过 2 轮 / 3 次调用 / 20 秒上限时记为 `denied` / `error`，回答仍会完成。审计不含参数、结果与令牌；服务器断开后保存引用会被拒绝，运行中的调用记为 `denied` / `not_connected`。
 - **更换嵌入模型需删集合并重建**：向量与模型绑定，`EMBEDDING_DIM` 必须与集合一致。更换模型或维度后旧向量与新向量不可比——需删除 Qdrant 集合（或数据卷）并对材料逐个重建索引；维度不符时 api 按依赖不可用处理（`vector`/`hybrid` 503，日志写明维度不符），`keyword` 不受影响。集合在首次索引时自动创建。
 - **单实例部署**：当前只支持单个 api/db 实例（登录限流计数在内存中，重启会清零），不做多副本、公网证书与 CI/CD，详见 `openspec/changes/add-auth-rbac-class-knowledge/proposal.md` 的 Non-goals。
 - **MySQL 首次启动较慢**：db 容器首次初始化建表可能需要几十秒，此时访问 web 可能短暂看到 502，等待 `docker compose ps` 中 db 变为 `healthy` 后即可正常访问。

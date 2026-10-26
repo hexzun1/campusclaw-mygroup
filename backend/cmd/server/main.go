@@ -25,6 +25,8 @@ import (
 	"campusclaw/backend/internal/httpapi"
 	"campusclaw/backend/internal/index"
 	"campusclaw/backend/internal/materials"
+	"campusclaw/backend/internal/mcp"
+	"campusclaw/backend/internal/openapi"
 	"campusclaw/backend/internal/search"
 	"campusclaw/backend/internal/swaggerui"
 	"campusclaw/backend/internal/tutor"
@@ -64,6 +66,7 @@ func main() {
 		StudentA1Password: cfg.SeedStudentA1Password,
 		StudentB1Password: cfg.SeedStudentB1Password,
 		UploadDir:         cfg.UploadDir,
+		MCPAuthToken:      cfg.MCPAuthToken,
 	}); err != nil {
 		log.Fatalf("seed: %v", err)
 	}
@@ -103,12 +106,23 @@ func main() {
 	requireAuth := auth.RequireAuth(conn, tokenIssuer)
 
 	materialsHandlers := materials.NewHandlers(conn, indexer, vectorClient)
+	mcpClient := mcp.NewClient(cfg.MCPConnectTimeout, cfg.MCPCallTimeout, cfg.MCPMaxResponseBytes)
+	mcpHandlers := mcp.NewHandlers(conn, mcpClient)
 	searchEngine := search.New(conn, embeddingClient, vectorClient)
 	searchHandlers := search.NewHandlers(searchEngine)
 	askHandlers := ask.NewHandlers(ask.New(searchEngine, chatClient))
-	tutorHandlers := tutor.NewHandlers(conn, searchEngine, chatClient)
+	toolStage := tutor.NewToolStage(conn, mcpClient, chatClient, cfg.MCPToolStageTimeout)
+	tutorHandlers := tutor.NewHandlers(conn, searchEngine, chatClient, toolStage)
 	teacher := func(h http.HandlerFunc) http.Handler {
 		return requireAuth(auth.RequireTeacher(h))
+	}
+
+	// The generated document is converted once and cached for the process
+	// lifetime; a malformed generated document would mean the binary and its
+	// docs disagree, which is a build problem worth failing on.
+	openapiDoc, err := openapi.Convert(docs.SwaggerInfo.ReadDoc())
+	if err != nil {
+		log.Fatalf("convert openapi document: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -140,15 +154,29 @@ func main() {
 	apiMux.Handle("POST /api/skills", teacher(tutorHandlers.CreateSkill))
 	apiMux.Handle("PUT /api/skills/{id}", teacher(tutorHandlers.UpdateSkill))
 	apiMux.Handle("DELETE /api/skills/{id}", teacher(tutorHandlers.DeleteSkill))
+	// MCP management and audit are teacher-only; class scoping comes from the
+	// session inside every handler (design.md Decision 5).
+	apiMux.Handle("GET /api/mcp/servers", teacher(mcpHandlers.ListServers))
+	apiMux.Handle("POST /api/mcp/servers", teacher(mcpHandlers.CreateServer))
+	apiMux.Handle("DELETE /api/mcp/servers/{id}", teacher(mcpHandlers.DeleteServer))
+	apiMux.Handle("POST /api/mcp/servers/{id}/connect", teacher(mcpHandlers.Connect))
+	apiMux.Handle("GET /api/mcp/servers/{id}/tools", teacher(mcpHandlers.ListTools))
+	apiMux.Handle("POST /api/mcp/servers/{id}/disconnect", teacher(mcpHandlers.Disconnect))
+	apiMux.Handle("GET /api/mcp/calls", teacher(mcpHandlers.ListCalls))
 	apiMux.Handle("GET /api/conversations", requireAuth(http.HandlerFunc(tutorHandlers.ListConversations)))
 	apiMux.Handle("POST /api/conversations", requireAuth(http.HandlerFunc(tutorHandlers.CreateConversation)))
 	apiMux.Handle("GET /api/conversations/{id}", requireAuth(http.HandlerFunc(tutorHandlers.DetailConversation)))
 	apiMux.Handle("POST /api/conversations/{id}/stream", requireAuth(http.HandlerFunc(tutorHandlers.StreamConversation)))
 	// API documentation (design.md Decision 9): served before the /api/
 	// subtree, without authentication and deliberately outside NoStore. The
-	// page, its initializer and the spec are served by this binary, so the doc
-	// can never go stale relative to the code.
+	// page, its initializer, the spec and its OpenAPI 3.0 conversion are
+	// served by this binary, so the doc can never go stale relative to the
+	// code.
 	mux.Handle("/swagger/", swaggerui.Handler(docs.SwaggerInfo.ReadDoc))
+	mux.HandleFunc("GET /openapi.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write(openapiDoc)
+	})
 
 	mux.Handle("/api/", httpapi.NoStore(apiMux))
 

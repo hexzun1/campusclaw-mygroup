@@ -26,6 +26,21 @@ func unmarshalTools(raw []byte) []string {
 	return tools
 }
 
+// checkSkillMCPTools writes the failure response and returns false when a
+// reference is invalid or the lookup failed; true means the skill may be saved.
+func (h *Handlers) checkSkillMCPTools(w http.ResponseWriter, r *http.Request, classID int, toolsJSON []byte) bool {
+	if err := validateSkillMCPTools(r.Context(), h.Conn, classID, unmarshalTools(toolsJSON)); err != nil {
+		var invalid *invalidSkillToolError
+		if errors.As(err, &invalid) {
+			httpapi.WriteError(w, http.StatusBadRequest, invalid.Error())
+		} else {
+			httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
+		}
+		return false
+	}
+	return true
+}
+
 // ListSkills implements GET /api/skills. A teacher sees every skill of the
 // class including its source text; a student sees only enabled skills and
 // never their source (spec: 学生看到的技能).
@@ -125,6 +140,9 @@ func (h *Handlers) CreateSkill(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !h.checkSkillMCPTools(w, r, su.ClassID, s.ToolsJSON) {
+		return
+	}
 	s.ClassID = su.ClassID
 
 	id, err := db.CreateSkill(r.Context(), h.Conn, s)
@@ -183,6 +201,9 @@ func (h *Handlers) UpdateSkill(w http.ResponseWriter, r *http.Request) {
 	s, err := ParseSkill(in.Source)
 	if err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !h.checkSkillMCPTools(w, r, su.ClassID, s.ToolsJSON) {
 		return
 	}
 	s.ID = id

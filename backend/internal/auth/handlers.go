@@ -72,6 +72,10 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
+	if req.Username == "" || req.Password == "" {
+		httpapi.WriteError(w, http.StatusBadRequest, "用户名和密码不能为空")
+		return
+	}
 
 	key := clientKey(r, req.Username)
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -60,7 +61,7 @@ type streamQuestionBody struct {
 // `error` event.
 //
 // @Summary 流式提问
-// @Description 以 SSE 返回一次作答。事件序列：meta（status、skill 与 citations）→ delta…（正文增量，拼接后即整段正文）→ done（message_id）；中途失败时在已推送部分之后给出 error。第一段正文之前的一切失败都是普通 JSON 错误。同一会话同时只允许一次生成，并发提问得到 409。响应头为 text/event-stream、Cache-Control: no-cache。
+// @Description 以 SSE 返回一次作答。事件序列：meta（status、skill、citations，本轮涉及 MCP 工具时另有 tool_calls）→ delta…（正文增量，拼接后即整段正文）→ done（message_id）；中途失败时在已推送部分之后给出 error。第一段正文之前的一切失败都是普通 JSON 错误。同一会话同时只允许一次生成，并发提问得到 409。响应头为 text/event-stream、Cache-Control: no-cache。
 // @Tags 会话
 // @Accept json
 // @Produce text/event-stream
@@ -170,19 +171,33 @@ func (h *Handlers) StreamConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	meta := streamMeta{Status: "ok", Skill: skillName, Citations: sources}
 
-	// Step 9: assemble the gateway request from the persisted window.
+	// Step 9: assemble the base gateway request from the persisted window.
 	history, err := db.ListRecentMessages(r.Context(), h.Conn, conv.ID, HistoryLimit)
 	if err != nil {
 		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
 		return
 	}
-	messages := BuildMessages(MessageInput{
+	messageInput := MessageInput{
 		Prompt:   agent.Prompt,
 		Skill:    skill,
 		Sources:  sources,
 		History:  history,
 		Question: question,
-	})
+	}
+	messages := BuildMessages(messageInput)
+
+	// Step 9b: the MCP tool stage runs before meta exists, and its audit rows
+	// are persisted before the first byte of the stream (design.md Decision 8).
+	toolResults, stageRan := h.runToolStage(r, su, conv, skill, messages, &meta)
+
+	// Step 9c: the final request carries successful tool results in the user
+	// message and the ⑥ declaration in the system message, never tool
+	// definitions.
+	if stageRan || len(toolResults) > 0 {
+		messageInput.ToolResults = toolResults
+		messageInput.ToolStage = stageRan
+		messages = BuildMessages(messageInput)
+	}
 
 	// Step 10: stream the answer through the output filter. Every push is a
 	// delta; their concatenation is exactly what step 11 persists.
@@ -238,6 +253,61 @@ func (h *Handlers) StreamConversation(w http.ResponseWriter, r *http.Request) {
 	writeStreamEnd(w, r, out, messageID, streamErr != nil)
 }
 
+// runToolStage resolves the routed skill's MCP references, runs the tool
+// loop, writes the audit rows and fills meta.tool_calls. Every failure is
+// degraded to "answer without tools": the turn never stops because of it.
+func (h *Handlers) runToolStage(r *http.Request, su *db.SessionUser, conv *db.Conversation, skill *db.Skill, messages []gateway.ChatMessage, meta *streamMeta) ([]ToolResult, bool) {
+	if h.Tools == nil || skill == nil {
+		return nil, false
+	}
+	var refs []string
+	for _, ref := range unmarshalTools(skill.ToolsJSON) {
+		if _, _, ok := splitMCPToolRef(ref); ok {
+			refs = append(refs, ref)
+		}
+	}
+	if len(refs) == 0 {
+		return nil, false
+	}
+
+	candidates, denied, err := h.Tools.Resolve(r.Context(), su.ClassID, refs)
+	if err != nil {
+		log.Printf("tutor: resolve mcp tool candidates: %v", err)
+		return nil, false
+	}
+	records := denied
+	var results []ToolResult
+	ran := false
+	if len(candidates) > 0 {
+		outcome := h.Tools.Run(r.Context(), ToolStageInput{
+			ClassID:    su.ClassID,
+			Messages:   messages,
+			Candidates: candidates,
+		})
+		records = append(records, outcome.Records...)
+		results = outcome.Results
+		ran = outcome.Ran
+	}
+	if len(records) == 0 {
+		return results, ran
+	}
+
+	inputs := make([]db.MCPToolCallInput, 0, len(records))
+	summaries := make([]ToolCallSummary, 0, len(records))
+	for _, record := range records {
+		inputs = append(inputs, record.auditInput(su.ClassID, su.UserID, conv.ID))
+		summaries = append(summaries, record.summary())
+	}
+	// The audit must survive even if the answer fails later, so it is
+	// committed before meta is written; a failure here is logged and the
+	// answer still proceeds.
+	if err := db.InsertToolCalls(r.Context(), h.Conn, inputs); err != nil {
+		log.Printf("tutor: insert mcp tool call audit: %v", err)
+	}
+	meta.ToolCalls = summaries
+	return results, ran
+}
+
 // writeStreamEnd appends the terminal event: `done` with the persisted
 // message id, or `error` after a mid-stream failure. A client that is already
 // gone gets neither.
@@ -266,9 +336,10 @@ func writeStreamLookupError(w http.ResponseWriter, err error) {
 // streamMeta is the first event: the turn's status, the routed skill's name
 // (null when none matched) and the numbered citations.
 type streamMeta struct {
-	Status    string   `json:"status"`
-	Skill     *string  `json:"skill"`
-	Citations []Source `json:"citations"`
+	Status    string            `json:"status"`
+	Skill     *string           `json:"skill"`
+	Citations []Source          `json:"citations"`
+	ToolCalls []ToolCallSummary `json:"tool_calls,omitempty"`
 }
 
 // deltaEvent carries one increment of the answer; concatenated deltas equal

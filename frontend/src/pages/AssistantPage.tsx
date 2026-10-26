@@ -13,6 +13,7 @@ import {
   type ConversationSummary,
   type Hit,
   type MaterialDetail,
+  type ToolCallSummary,
 } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
 import MaterialDetailView from '../components/MaterialDetailView'
@@ -28,6 +29,7 @@ interface LiveTurn {
   answer: string
   citations: Hit[]
   skill: string | null
+  toolCalls: ToolCallSummary[]
   error: string | null
 }
 
@@ -157,7 +159,7 @@ export default function AssistantPage() {
     controllersRef.current.set(turnID, controller)
     setTurns((prev) => [
       ...prev,
-      { id: turnID, question: q, status: 'pending', answer: '', citations: [], skill: null, error: null },
+      { id: turnID, question: q, status: 'pending', answer: '', citations: [], skill: null, toolCalls: [], error: null },
     ])
     setQuestion('')
 
@@ -166,7 +168,13 @@ export default function AssistantPage() {
         activeId,
         q,
         {
-          onMeta: (meta) => updateTurn(turnID, (t) => ({ ...t, citations: meta.citations, skill: meta.skill })),
+          onMeta: (meta) =>
+            updateTurn(turnID, (t) => ({
+              ...t,
+              citations: meta.citations,
+              skill: meta.skill,
+              toolCalls: meta.tool_calls ?? [],
+            })),
           onDelta: (text) => updateTurn(turnID, (t) => ({ ...t, answer: t.answer + text })),
           onDone: () => {
             updateTurn(turnID, (t) => ({ ...t, status: 'done' }))
@@ -235,10 +243,27 @@ export default function AssistantPage() {
     )
   }
 
+  // The tags come from meta only: this turn's tool references and statuses,
+  // never arguments or result text. denied/error use their own styles.
+  function toolCallTags(calls: ToolCallSummary[]) {
+    const label: Record<ToolCallSummary['status'], string> = { ok: '成功', error: '失败', denied: '被拒绝' }
+    return (
+      <ul className="tool-calls" aria-label="工具调用">
+        {calls.map((c, i) => (
+          <li key={`${c.tool}-${i}`} className={`tool-call tool-call-${c.status}`}>
+            {c.tool} · {label[c.status]}
+            {c.reason ? `（${c.reason}）` : ''} · 第 {c.round} 轮
+          </li>
+        ))}
+      </ul>
+    )
+  }
+
   function renderTurn(t: LiveTurn) {
     return (
       <div key={`t-${t.id}`} className="ask-turn">
         <p className="ask-question">{t.question}</p>
+        {t.toolCalls.length > 0 && toolCallTags(t.toolCalls)}
         {t.answer === '' && t.status === 'pending' && <p className="ask-pending">正在生成回答…</p>}
         {t.answer !== '' && (
           <section className="ask-answer" aria-label="助手回答">
