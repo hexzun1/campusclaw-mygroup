@@ -60,8 +60,8 @@ func TestRPCErrorCodes(t *testing.T) {
 	srv := newTestServer(t)
 
 	cases := []struct {
-		name    string
-		body    string
+		name     string
+		body     string
 		wantCode int
 	}{
 		{"非法 JSON", `not json`, codeParseError},

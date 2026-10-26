@@ -24,9 +24,9 @@ func WriteError(w http.ResponseWriter, status int, message string) {
 }
 
 const (
-	MsgUnauthorized = "未登录或会话已失效"
-	MsgForbidden    = "没有权限执行该操作"
-	MsgNotFound     = "记录不存在"
-	MsgServiceDown  = "服务暂不可用，请稍后重试"
+	MsgUnauthorized   = "未登录或会话已失效"
+	MsgForbidden      = "没有权限执行该操作"
+	MsgNotFound       = "记录不存在"
+	MsgServiceDown    = "服务暂不可用，请稍后重试"
 	MsgBadCredentials = "用户名或密码错误"
 )

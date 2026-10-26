@@ -16,9 +16,9 @@
 
 ## 3. 客户端协议细节
 
-- [ ] 3.1 `Accept` 改为只有 `application/json`（design D5）— verify: `go test ./internal/mcp -run AcceptHeader`，`httptest` 记录到的 `Accept` 恰为 `application/json`
-- [ ] 3.2 `transportError` 增加阶段参数：握手超时为「连接超时」，`tools/call` 超时为「调用超时」（design D10）— verify: `go test ./internal/mcp -run Timeout`：远端在 `initialize` 上阻塞时 `Discover` 错误含「连接超时」；远端只在 `tools/call` 上阻塞时 `Call` 错误含「调用超时」且不含「连接超时」
-- [ ] 3.3 本组验证 — verify: `gofmt -l backend mcp-server` 无输出；`cd backend && go vet ./internal/mcp && go test ./internal/mcp` 通过
+- [x] 3.1 `Accept` 改为只有 `application/json`（design D5）— verify: `go test ./internal/mcp -run AcceptHeader`，`httptest` 记录到的 `Accept` 恰为 `application/json`
+- [x] 3.2 `transportError` 增加阶段参数：握手超时为「连接超时」，`tools/call` 超时为「调用超时」（design D10）— verify: `go test ./internal/mcp -run Timeout`：远端在 `initialize` 上阻塞时 `Discover` 错误含「连接超时」；远端只在 `tools/call` 上阻塞时 `Call` 错误含「调用超时」且不含「连接超时」
+- [x] 3.3 本组验证 — verify: `gofmt -l backend mcp-server` 无输出；`cd backend && go vet ./internal/mcp && go test ./internal/mcp` 通过
 
 ## 4. 防 SSRF
 

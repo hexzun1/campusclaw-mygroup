@@ -24,8 +24,8 @@ func newFakeServer(t *testing.T, tools []Tool) (*httptest.Server, *[]string) {
 			http.Error(w, "bad token "+testToken, http.StatusUnauthorized)
 			return
 		}
-		if accept := r.Header.Get("Accept"); !strings.Contains(accept, "application/json") || !strings.Contains(accept, "text/event-stream") {
-			http.Error(w, "bad accept", http.StatusBadRequest)
+		if accept := r.Header.Get("Accept"); accept != "application/json" {
+			http.Error(w, "bad accept "+accept, http.StatusBadRequest)
 			return
 		}
 
@@ -225,7 +225,7 @@ func TestDiscoverErrorClassificationAndRedaction(t *testing.T) {
 			},
 			timeout:   50 * time.Millisecond,
 			maxBytes:  256 * 1024,
-			wantInMsg: "无法连接到服务器",
+			wantInMsg: "连接超时",
 		},
 	}
 
@@ -312,5 +312,101 @@ func TestCallRedactsResult(t *testing.T) {
 	}
 	if result.IsError {
 		t.Errorf("IsError = true, want false")
+	}
+}
+
+// TestAcceptHeaderDeclaresOnlyJSON is spec 「连接与工具发现」Scenario
+// 请求只声明 JSON: every request the host sends asks for JSON alone.
+func TestAcceptHeaderDeclaresOnlyJSON(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Accept"))
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "initialize":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+		default:
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClient(2*time.Second, 2*time.Second, 256*1024)
+	if _, err := client.Discover(context.Background(), srv.URL, testToken); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if _, err := client.Call(context.Background(), srv.URL, testToken, "formula_hint", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+
+	if len(seen) != 6 {
+		t.Fatalf("requests = %d, want 6 (3 per operation)", len(seen))
+	}
+	for i, accept := range seen {
+		if accept != "application/json" {
+			t.Errorf("request %d Accept = %q, want exactly application/json", i+1, accept)
+		}
+	}
+}
+
+// TestTimeoutWordingDependsOnThePhase is spec 「连接与工具发现」Scenario
+// 超时提示区分阶段: a handshake timeout says 连接超时, a tools/call timeout says
+// 调用超时 and never the former.
+func TestTimeoutWordingDependsOnThePhase(t *testing.T) {
+	// Every JSON-RPC method sleeps past the timeout; the handshake is served
+	// normally so only tools/call can time out.
+	slowCall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "initialize":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+		default:
+			time.Sleep(400 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`))
+		}
+	}))
+	defer slowCall.Close()
+
+	client := NewClient(2*time.Second, 50*time.Millisecond, 256*1024)
+	_, err := client.Call(context.Background(), slowCall.URL, testToken, "formula_hint", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("Call succeeded against a server that never answers tools/call")
+	}
+	if !strings.Contains(err.Error(), "调用超时") {
+		t.Errorf("error = %q, want 调用超时", err)
+	}
+	if strings.Contains(err.Error(), "连接超时") {
+		t.Errorf("a tools/call timeout must not be reported as 连接超时: %q", err)
+	}
+
+	// The handshake phase: initialize itself never answers.
+	slowInit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer slowInit.Close()
+
+	client = NewClient(50*time.Millisecond, 2*time.Second, 256*1024)
+	if _, err := client.Discover(context.Background(), slowInit.URL, testToken); err == nil {
+		t.Fatal("Discover succeeded against a server that never answers initialize")
+	} else if !strings.Contains(err.Error(), "连接超时") {
+		t.Errorf("error = %q, want 连接超时", err)
 	}
 }

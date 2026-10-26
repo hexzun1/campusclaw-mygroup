@@ -13,7 +13,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -67,7 +66,7 @@ func (c *Client) Discover(ctx context.Context, baseURL, token string) ([]Tool, e
 	var result struct {
 		Tools []Tool `json:"tools"`
 	}
-	if err := c.call(ctx, baseURL, token, s, "tools/list", nil, &result); err != nil {
+	if err := c.call(ctx, baseURL, token, s, "tools/list", nil, &result, phaseConnect); err != nil {
 		return nil, redactError(err, token)
 	}
 	for i := range result.Tools {
@@ -98,7 +97,7 @@ func (c *Client) Call(ctx context.Context, baseURL, token, tool string, argument
 		} `json:"content"`
 		IsError bool `json:"isError"`
 	}
-	if err := c.call(ctx, baseURL, token, s, "tools/call", params, &result); err != nil {
+	if err := c.call(ctx, baseURL, token, s, "tools/call", params, &result, phaseCall); err != nil {
 		return CallResult{}, redactError(err, token)
 	}
 
@@ -131,14 +130,14 @@ func (c *Client) handshake(ctx context.Context, baseURL, token string) (*session
 	var result struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
-	if err := c.call(ctx, baseURL, token, s, "initialize", params, &result); err != nil {
+	if err := c.call(ctx, baseURL, token, s, "initialize", params, &result, phaseConnect); err != nil {
 		return nil, err
 	}
 	if result.ProtocolVersion != "" {
 		s.version = result.ProtocolVersion
 	}
 
-	if err := c.notify(ctx, baseURL, token, s, "notifications/initialized"); err != nil {
+	if err := c.notify(ctx, baseURL, token, s, "notifications/initialized", phaseConnect); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -155,7 +154,7 @@ type rpcResponse struct {
 }
 
 // call sends one JSON-RPC request and decodes its result into out.
-func (c *Client) call(ctx context.Context, baseURL, token string, s *session, method string, params any, out any) error {
+func (c *Client) call(ctx context.Context, baseURL, token string, s *session, method string, params any, out any, phase requestPhase) error {
 	payload := map[string]any{"jsonrpc": "2.0", "id": 1, "method": method}
 	if params != nil {
 		payload["params"] = params
@@ -165,7 +164,7 @@ func (c *Client) call(ctx context.Context, baseURL, token string, s *session, me
 		return fmt.Errorf("协议错误：无法编码请求")
 	}
 
-	resp, raw, err := c.post(ctx, baseURL, token, s, body)
+	resp, raw, err := c.post(ctx, baseURL, token, s, body, phase)
 	if err != nil {
 		return err
 	}
@@ -199,12 +198,12 @@ func (c *Client) call(ctx context.Context, baseURL, token string, s *session, me
 	return nil
 }
 
-func (c *Client) notify(ctx context.Context, baseURL, token string, s *session, method string) error {
+func (c *Client) notify(ctx context.Context, baseURL, token string, s *session, method string, phase requestPhase) error {
 	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method})
 	if err != nil {
 		return errors.New("协议错误：无法编码通知")
 	}
-	resp, _, err := c.post(ctx, baseURL, token, s, body)
+	resp, _, err := c.post(ctx, baseURL, token, s, body, phase)
 	if err != nil {
 		return err
 	}
@@ -214,14 +213,25 @@ func (c *Client) notify(ctx context.Context, baseURL, token string, s *session, 
 	return nil
 }
 
-func (c *Client) post(ctx context.Context, baseURL, token string, s *session, body []byte) (*http.Response, []byte, error) {
+// requestPhase says which stage a request belongs to, so a timeout can be
+// reported as a connect or a call timeout (spec: 连接与工具发现; design D10).
+type requestPhase int
+
+const (
+	phaseConnect requestPhase = iota
+	phaseCall
+)
+
+func (c *Client) post(ctx context.Context, baseURL, token string, s *session, body []byte, phase requestPhase) (*http.Response, []byte, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + "/mcp"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, errors.New("协议错误：服务器地址无效")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
+	// Single JSON responses only: the host rejects anything else, so declaring
+	// SSE would mislead the server (spec: 连接与工具发现; design.md Decision 5).
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	if s != nil {
 		req.Header.Set("MCP-Protocol-Version", s.version)
@@ -232,7 +242,7 @@ func (c *Client) post(ctx context.Context, baseURL, token string, s *session, bo
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, nil, transportError(err)
+		return nil, nil, transportError(err, phase)
 	}
 	defer resp.Body.Close()
 
@@ -248,7 +258,7 @@ func (c *Client) post(ctx context.Context, baseURL, token string, s *session, bo
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, nil, transportError(err)
+		return nil, nil, transportError(err, phase)
 	}
 	if int64(len(raw)) > limit {
 		return nil, nil, fmt.Errorf("协议错误：响应超过 %d 字节上限", limit)
@@ -262,21 +272,26 @@ func (c *Client) post(ctx context.Context, baseURL, token string, s *session, bo
 	return resp, raw, nil
 }
 
-// transportError turns dial and timeout failures into the two messages the
-// teacher page shows. It deliberately never includes the URL or headers.
-func transportError(err error) error {
-	if errors.Is(err, context.DeadlineExceeded) {
+// transportError turns dial and timeout failures into the readable messages
+// the teacher page and the model see. A timeout during the handshake is a
+// connection timeout; a timeout on tools/call is a call timeout (design D10).
+// It deliberately never includes the URL or headers.
+func transportError(err error, phase requestPhase) error {
+	if isTimeout(err) {
+		if phase == phaseCall {
+			return errors.New("调用超时")
+		}
 		return errors.New("无法连接到服务器：连接超时")
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return errors.New("无法连接到服务器：连接超时")
-	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) || errors.As(err, &netErr) {
-		return errors.New("无法连接到服务器")
 	}
 	return errors.New("无法连接到服务器")
+}
+
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // redact removes the token from any message before it reaches a response or a
