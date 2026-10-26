@@ -36,6 +36,10 @@ const (
 	toolRejectedPrefix     = "调用被拒绝："
 	toolFailedPrefix       = "调用失败："
 	toolStageRejectedLimit = "超出本轮工具阶段上限"
+	// Audit column widths in characters: mcp_tool_calls.tool is VARCHAR(64)
+	// and .server VARCHAR(32) (design.md Decision 2).
+	auditToolRunes   = 64
+	auditServerRunes = 32
 )
 
 // ToolCatalog is the narrow, class-scoped data access the candidate resolver
@@ -115,10 +119,17 @@ func (r ToolCallRecord) summary() ToolCallSummary {
 
 // auditInput renders the record as the audit row. There is no field for
 // arguments, results or tokens (spec: 调用审计).
+//
+// The tool and server columns are VARCHAR(64) and VARCHAR(32) counting
+// characters, so an over-long model-invented name is truncated here rather
+// than failing the whole round's insert; meta.tool_calls keeps the original
+// (design.md Decision 2).
 func (r ToolCallRecord) auditInput(classID, userID, conversationID int) db.MCPToolCallInput {
 	in := db.MCPToolCallInput{
 		ClassID: classID, UserID: userID, ConversationID: conversationID,
-		Server: r.ServerName, Tool: r.ToolName, Status: r.Status,
+		Server: truncateRunes(r.ServerName, auditServerRunes),
+		Tool:   truncateRunes(r.ToolName, auditToolRunes),
+		Status: r.Status,
 		Reason: r.Reason, Round: r.Round, DurationMS: r.DurationMS,
 	}
 	if r.ServerID > 0 {

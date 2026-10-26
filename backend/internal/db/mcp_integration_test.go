@@ -308,3 +308,63 @@ func TestMCPReferencingSkills(t *testing.T) {
 		}
 	}
 }
+
+// TestInsertToolCallsTruncatedRowSharesTheBatch is spec 「调用审计」Scenario
+// 超长函数名不影响同轮审计 at the storage layer: a truncated over-long name
+// and a normal row land in the same transaction.
+func TestInsertToolCallsTruncatedRowSharesTheBatch(t *testing.T) {
+	conn := openTestDB(t)
+	ctx := context.Background()
+	classA, _, teacherA := fixture(t, conn)
+	studentA1 := userIDByUsername(t, conn, "student_a1")
+
+	agent := createTestAgent(t, conn, classA, "测试智能体-截断审计", nil, nil)
+	conv := createTestConversation(t, conn, classA, studentA1, agent)
+	t.Cleanup(func() {
+		if _, err := conn.ExecContext(context.Background(),
+			`DELETE FROM mcp_tool_calls WHERE conversation_id = ?`, conv); err != nil {
+			t.Errorf("cleanup mcp tool calls: %v", err)
+		}
+	})
+
+	serverID := createTestMCPServer(t, conn, classA, teacherA, "测试服务器-截断", "token-abc")
+	longTool := strings.Repeat("a", 64)
+	longServer := strings.Repeat("b", 32)
+
+	if err := InsertToolCalls(ctx, conn, []MCPToolCallInput{
+		{
+			ClassID: classA, UserID: studentA1, ConversationID: conv, ServerID: &serverID,
+			Server: "测试服务器-截断", Tool: "formula_hint", Status: "ok", Round: 1, DurationMS: 7,
+		},
+		{
+			ClassID: classA, UserID: studentA1, ConversationID: conv,
+			Server: longServer, Tool: longTool, Status: "denied", Reason: "not_allowed", Round: 1,
+		},
+	}); err != nil {
+		t.Fatalf("InsertToolCalls with a truncated row: %v", err)
+	}
+
+	calls, err := ListToolCalls(ctx, conn, classA, 200)
+	if err != nil {
+		t.Fatalf("ListToolCalls: %v", err)
+	}
+	var ours []MCPToolCall
+	for _, call := range calls {
+		if call.ConversationID == conv {
+			ours = append(ours, call)
+		}
+	}
+	if len(ours) != 2 {
+		t.Fatalf("rows for conversation %d = %d, want 2 (neither row may fail the batch)", conv, len(ours))
+	}
+	// Newest first: the truncated denied row.
+	if !strings.HasPrefix(ours[0].Tool, longTool+"@") || !strings.HasSuffix(ours[0].Tool, longServer) {
+		t.Errorf("truncated row tool = %q, want %q@%q", ours[0].Tool, longTool, longServer)
+	}
+	if ours[0].Status != "denied" || ours[0].Reason != "not_allowed" {
+		t.Errorf("truncated row = %+v, want denied/not_allowed", ours[0])
+	}
+	if ours[1].Tool != "formula_hint@测试服务器-截断" || ours[1].Status != "ok" {
+		t.Errorf("normal row = %+v", ours[1])
+	}
+}

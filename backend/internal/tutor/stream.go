@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"campusclaw/backend/internal/db"
@@ -23,6 +24,10 @@ const (
 	maxQuestionRunes = 500
 	// streamTopK is how many chunks one turn may cite.
 	streamTopK = 4
+	// auditTimeout bounds the audit write once it is detached from the
+	// request, so a stalled database cannot hold the handler forever
+	// (design.md Decision 1).
+	auditTimeout = 5 * time.Second
 )
 
 // msgStreamAborted is the generic mid-stream failure text: it names no
@@ -301,7 +306,14 @@ func (h *Handlers) runToolStage(r *http.Request, su *db.SessionUser, conv *db.Co
 	// The audit must survive even if the answer fails later, so it is
 	// committed before meta is written; a failure here is logged and the
 	// answer still proceeds.
-	if err := db.InsertToolCalls(r.Context(), h.Conn, inputs); err != nil {
+	//
+	// It also must survive the client hanging up: the calls already happened
+	// and the spec requires them recorded, so the write is detached from the
+	// request's cancellation while keeping its values, under a short timeout
+	// (spec: 调用审计; design.md Decision 1).
+	auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(r.Context()), auditTimeout)
+	defer cancelAudit()
+	if err := h.auditWriter()(auditCtx, h.Conn, inputs); err != nil {
 		log.Printf("tutor: insert mcp tool call audit: %v", err)
 	}
 	meta.ToolCalls = summaries

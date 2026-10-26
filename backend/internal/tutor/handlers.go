@@ -1,6 +1,7 @@
 package tutor
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,10 @@ type Handlers struct {
 	// not exercise it), and the turn behaves exactly like iteration 3.
 	Tools *ToolStage
 
+	// insertToolCalls persists the tool-call audit. Nil means db.InsertToolCalls;
+	// tests replace it to observe the context the write receives.
+	insertToolCalls func(ctx context.Context, conn *sql.DB, calls []db.MCPToolCallInput) error
+
 	// locks serialises answer generation per conversation: a question asked
 	// while the previous answer is still being generated answers 409
 	// (design.md Decision 5). Entries live for the process lifetime; their
@@ -56,6 +61,15 @@ func NewHandlers(conn *sql.DB, retriever MaterialRetriever, chat StreamChatter, 
 func (h *Handlers) lockFor(conversationID int) *sync.Mutex {
 	m, _ := h.locks.LoadOrStore(conversationID, &sync.Mutex{})
 	return m.(*sync.Mutex)
+}
+
+// auditWriter is the audit insert this handler set uses: the package function
+// unless a test injected one.
+func (h *Handlers) auditWriter() func(context.Context, *sql.DB, []db.MCPToolCallInput) error {
+	if h.insertToolCalls != nil {
+		return h.insertToolCalls
+	}
+	return db.InsertToolCalls
 }
 
 // readBody reads a bounded request body; on failure it writes 400 itself.
