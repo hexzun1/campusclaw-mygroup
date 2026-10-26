@@ -20,8 +20,12 @@ import (
 // Tool loop limits (spec: 工具调用循环). The stage timeout is configurable;
 // rounds, calls and the result cap are fixed product rules.
 const (
-	defaultToolRounds      = 2
-	defaultToolCalls       = 3
+	defaultToolRounds = 2
+	defaultToolCalls  = 3
+	// defaultToolAttempts caps how many calls the model may request in one
+	// stage, including the ones the host refuses. It exists so a model that
+	// hallucinates calls cannot flood the audit (spec: 工具调用循环; design D3).
+	defaultToolAttempts    = 10
 	defaultToolTimeout     = 20 * time.Second
 	defaultToolResultRunes = 2000
 	toolCallStatusOK       = "ok"
@@ -165,6 +169,7 @@ type ToolStage struct {
 
 	MaxRounds   int
 	MaxCalls    int
+	MaxAttempts int
 	Timeout     time.Duration
 	ResultRunes int
 	Now         func() time.Time
@@ -198,6 +203,13 @@ func (s *ToolStage) maxCalls() int {
 		return s.MaxCalls
 	}
 	return defaultToolCalls
+}
+
+func (s *ToolStage) maxAttempts() int {
+	if s.MaxAttempts > 0 {
+		return s.MaxAttempts
+	}
+	return defaultToolAttempts
 }
 
 func (s *ToolStage) timeout() time.Duration {
@@ -295,6 +307,15 @@ func deniedRecord(ref, tool, server string, id int) ToolCallRecord {
 	}
 }
 
+// mergedLimitRecord stands for the 11th request and everything after it: one
+// row with tool `*` and no server, so meta stays readable and the audit cannot
+// be flooded (spec: 工具调用循环; design.md Decision 3).
+func mergedLimitRecord(round int) ToolCallRecord {
+	return ToolCallRecord{
+		Tool: "*", Status: toolCallStatusDenied, Reason: reasonLimit, Round: round,
+	}
+}
+
 // Run performs the tool stage: up to MaxRounds non-streamed exchanges, host
 // validation of every requested call, remote invocation, and tool messages
 // fed back to the model. Gateway failure degrades to an empty stage; the
@@ -325,7 +346,11 @@ func (s *ToolStage) Run(ctx context.Context, in ToolStageInput) ToolStageResult 
 
 	out := ToolStageResult{Ran: true}
 	messages := append([]gateway.ChatMessage(nil), in.Messages...)
+	// calls counts the requests that passed the candidate check and therefore
+	// use up the 3-call budget; attempts counts every request the model made,
+	// refused ones included (design.md Decision 3).
 	calls := 0
+	attempts := 0
 
 	for round := 1; round <= s.maxRounds(); round++ {
 		reply, err := s.Chat.ChatWithTools(stageCtx, messages, definitions)
@@ -348,6 +373,15 @@ func (s *ToolStage) Run(ctx context.Context, in ToolStageInput) ToolStageResult 
 
 		limitHit := false
 		for _, call := range reply.ToolCalls {
+			if attempts >= s.maxAttempts() {
+				// The 11th request and everything after it are recorded as one
+				// merged row; per-request rows would let the model flood the
+				// audit (spec: 工具调用循环; design.md Decision 3).
+				out.Records = append(out.Records, mergedLimitRecord(round))
+				limitHit = true
+				break
+			}
+			attempts++
 			record, content := s.runCall(stageCtx, in.ClassID, call, byFunction, &calls, deadline)
 			record.Round = round
 			out.Records = append(out.Records, record)
@@ -388,15 +422,18 @@ func (s *ToolStage) runCall(ctx context.Context, classID int, call gateway.ToolC
 		Tool:     call.Function.Name,
 		ToolName: call.Function.Name,
 	}
-	*calls++
 
 	candidate, ok := byFunction[call.Function.Name]
 	if !ok {
+		// A function outside the candidate set never consumes the 3-call
+		// budget: only calls the host would actually forward count (spec:
+		// 工具调用循环; design.md Decision 3).
 		record.Status = toolCallStatusDenied
 		record.Reason = reasonNotAllowed
 		record.DurationMS = s.now().Sub(start).Milliseconds()
 		return record, toolRejectedPrefix + "该工具不在本轮候选集中"
 	}
+	*calls++
 	record.Tool = candidate.ToolName + "@" + candidate.ServerName
 	record.ToolName = candidate.ToolName
 	record.ServerName = candidate.ServerName

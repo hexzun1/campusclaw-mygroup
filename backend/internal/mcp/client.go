@@ -38,9 +38,9 @@ type CallResult struct {
 // Client talks to every registered server. Timeouts and the response cap come
 // from configuration so they stay testable and adjustable.
 type Client struct {
-	HTTPClient   *http.Client
-	ConnectTimeout time.Duration
-	CallTimeout  time.Duration
+	HTTPClient       *http.Client
+	ConnectTimeout   time.Duration
+	CallTimeout      time.Duration
 	MaxResponseBytes int64
 }
 
@@ -108,7 +108,12 @@ func (c *Client) Call(ctx context.Context, baseURL, token, tool string, argument
 			texts = append(texts, item.Text)
 		}
 	}
-	return CallResult{Text: strings.Join(texts, "\n"), IsError: result.IsError}, nil
+	// A remote server can echo the token it was called with, and this text
+	// reaches the model through tool messages and the user message. The token
+	// is redacted here, before the host truncates: a cut in the middle of a
+	// token would otherwise leave half of it behind (design.md Decision 4).
+	text := redact(strings.Join(texts, "\n"), token)
+	return CallResult{Text: text, IsError: result.IsError}, nil
 }
 
 type session struct {

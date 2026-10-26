@@ -10,9 +10,9 @@
 
 ## 2. 调用循环口径与结果脱敏
 
-- [ ] 2.1 `ToolStage` 拆分 `attempts`（上限 10）与 `calls`（上限 3，候选确认后才计数）；第 11 个请求起合并为一条 `{tool:"*", denied, limit}` 并结束阶段（design D3）— verify: `go test ./internal/tutor -run ToolStage` 覆盖：「2 次候选外 + 3 次候选内」时候选内 3 次全部发往远端且无 `limit`；「4 次候选内」时第 4 次为 `limit`（原场景不变）；「25 次候选外」时记录恰 11 条，最后一条 `reason=limit`
-- [ ] 2.2 `mcp.Client.Call` 对结果文本先执行 `redact(text, token)`，再交给 `cleanToolText`（design D4）— verify: `go test ./internal/mcp -run CallRedactsResult`：`httptest` 远端返回含令牌的文本，`CallResult.Text` 不含令牌且含 `***`；`go test ./internal/tutor -run ToolResultRedacted` 断言最终用户消息中无令牌
-- [ ] 2.3 本组验证 — verify: `cd backend && go test ./internal/tutor/... ./internal/mcp/...` 通过；开发栈上让网关桩一次返回 25 个候选外调用，`meta.tool_calls` 长度为 11、回答正常完成，`mcp_tool_calls` 本轮新增 11 行
+- [x] 2.1 `ToolStage` 拆分 `attempts`（上限 10）与 `calls`（上限 3，候选确认后才计数）；第 11 个请求起合并为一条 `{tool:"*", denied, limit}` 并结束阶段（design D3）— verify: `go test ./internal/tutor -run ToolStage` 覆盖：「2 次候选外 + 3 次候选内」时候选内 3 次全部发往远端且无 `limit`；「4 次候选内」时第 4 次为 `limit`（原场景不变）；「25 次候选外」时记录恰 11 条，最后一条 `reason=limit`
+- [x] 2.2 `mcp.Client.Call` 对结果文本先执行 `redact(text, token)`，再交给 `cleanToolText`（design D4）— verify: `go test ./internal/mcp -run CallRedactsResult`：`httptest` 远端返回含令牌的文本，`CallResult.Text` 不含令牌且含 `***`；`go test ./internal/tutor -run ToolResultRedacted` 断言最终用户消息中无令牌
+- [x] 2.3 本组验证 — verify: `cd backend && go test ./internal/tutor/... ./internal/mcp/...` 通过；开发栈上让网关桩一次返回 25 个候选外调用，`meta.tool_calls` 长度为 11、回答正常完成，`mcp_tool_calls` 本轮新增 11 行
 
 ## 3. 客户端协议细节
 
