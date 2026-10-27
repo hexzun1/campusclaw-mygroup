@@ -52,4 +52,4 @@
 - [x] 8.2 全量自动化 — verify: `gofmt -l backend mcp-server` 无输出；`cd backend && go vet ./... && go test ./...`、`cd mcp-server && go test ./...`、`python apitest/run_all.py` 全部通过并记录报告文件名
 - [x] 8.3 原有同伴验证场景回归 — verify: `mcp-tools`「逐班授权与令牌保护」①–④ 按 `docs/iteration-4.md` 中的命令重跑，结果不变；对本次新增的被拒地址响应、连接失败响应与 `docker compose logs api` 检索 `$MT`，均无匹配
 - [x] 8.4 清理与机密检查 — verify: `git ls-files | grep -x .env` 无输出；对仓库检索 `$MT` 无输出
-- [ ] 8.5 归档本 change（需使用者明确指示后执行 `/opsx:archive`）— verify: `openspec list` 中无本 change；`openspec/specs/mcp-tools/spec.md` 中被修改的 5 条 Requirement 已是新内容
+- [x] 8.5 归档本 change（需使用者明确指示后执行 `/opsx:archive`）— verify: `openspec list` 中无本 change；`openspec/specs/mcp-tools/spec.md` 中被修改的 5 条 Requirement 已是新内容
