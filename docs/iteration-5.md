@@ -284,3 +284,71 @@ $ SELECT (SELECT COUNT(*) FROM skills WHERE name='证据技能'),
          (SELECT COUNT(*) FROM mcp_servers WHERE id=1412);
 0	0	0
 ```
+
+---
+
+## 8.3 原有同伴验证场景回归（`mcp-tools`「逐班授权与令牌保护」①–④）
+
+命令按 `docs/iteration-4.md` 的精神重跑：临时创建 B 班教师 `tmp_teacher_b_iter5`（复制 teacher_a 的
+`password_hash`），对 A 班服务器编号 `379` 与不存在的 `999999` 逐一调用。
+
+### ① 服务器隔离
+
+```
+connect     A班编号=404 不存在=404 identical -> {"error":"记录不存在"}
+tools       A班编号=404 不存在=404 identical -> {"error":"记录不存在"}
+disconnect  A班编号=404 不存在=404 identical -> {"error":"记录不存在"}
+DELETE      A班编号=404 不存在=404 identical -> {"error":"记录不存在"}
+保存引用他班技能 -> 400 {"error":"字段“工具”的取值“formula_hint@campus-tools”：服务器“campus-tools”不存在，请先登记并连接"}
+```
+
+A 班服务器状态无变化（后续场景仍能正常连接）。
+
+### ② 令牌不回传
+
+```
+列表       HTTP 200 含令牌=False
+登记       HTTP 201 含令牌=False
+连接       HTTP 200 含令牌=False
+工具清单     HTTP 200 含令牌=False
+连接失败     HTTP 502 含令牌=False
+
+$ docker compose -f docker-compose.dev.yml logs api | grep -c "$MT"
+0
+$ docker compose -f docker-compose.dev.yml logs mcp-demo | grep -c "$MT"
+0
+```
+
+### ③ 断开即失效
+
+```
+建技能(连接时) -> 201
+断开 -> 204
+断开后保存 -> 400 {"error":"字段“工具”的取值“formula_hint@campus-tools”：服务器“campus-tools”未连接，请先在工具服务器页连接"}
+meta.status = ok
+meta.tool_calls = [{"tool": "formula_hint@campus-tools", "status": "denied", "reason": "not_connected", "round": 0, "duration_ms": 0}]
+事件序列 = meta ... done 无 error
+审计 = [{"id": 239, "tool": "formula_hint@campus-tools", "status": "denied", "reason": "not_connected",
+        "username": "student_a1", "conversation_id": 193, "round": 0, "duration_ms": 0, ...}]
+重新连接 -> 200
+```
+
+### ④ 审计只看本班
+
+```
+B班教师看到了 0 条
+与 A 班记录的交集 = []
+```
+
+### 本次新增响应的令牌检查
+
+```
+被拒地址: (400, '{"error":"服务器地址不允许指向本机、元数据或内部服务"}')
+连接失败: (502, '{"error":"无法连接到服务器：连接超时"}')
+api 日志含令牌 = 0；mcp-demo 日志含令牌 = 0
+```
+
+**结论：①–④ 结果与 `docs/iteration-4.md` 一致，通过。**
+
+回归结束后清理了临时教师、技能、智能体、会话与审计行，预置数据回到
+`skills = 数学解题引导 / 语文解题引导 / 验收B班技能`、`mcp_servers = 1（campus-tools，connected）`。
