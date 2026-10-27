@@ -44,7 +44,7 @@
 
 - [x] 7.1 apitest 新增用例：`apitest/cases/api/mcp/servers/POST.py` 加入被禁止的地址与多字节令牌；`apitest/cases/api/mcp/calls/GET.py` 加入超长函数名截断（需网关桩 `/control` 支持）；`apitest/cases/e2e/test_mcp_flow.py` 加入"候选外调用不占名额" — verify: `python apitest/run_all.py` 全部通过，新增用例出现在 HTML 报告中
 - [x] 7.2 README 增加升级说明：以 `localhost` 或回环地址登记的服务器需要删除后改用服务名重新登记；列出被禁止的主机 — verify: `grep -n "169.254.169.254" README.md` 有输出
-- [ ] 7.3 本组验证 — verify: `docs/iteration-5.md` 记录 1.3、2.3、3.3、4.3、5.4、6.4、7.1 的命令与输出
+- [x] 7.3 本组验证 — verify: `docs/iteration-5.md` 记录 1.3、2.3、3.3、4.3、5.4、6.4、7.1 的命令与输出
 
 ## 8. 全量验收
 
