@@ -142,6 +142,20 @@
 
 `gofmt -l backend mcp-server` 必须输出为空，这一步写进各组的验证命令。
 
+### D13 网关桩的 `/control` 支持 `reset` 与一次性强制调用
+
+apitest 的 7.1 要在同一次运行里既覆盖「超长函数名截断」又覆盖「候选外调用不占名额」。两者都要求网关桩按用例指定的内容返回 `tool_calls`，而且必须能恢复默认行为：现在的 `forcedToolCalls` 只能被覆盖为另一个非空列表，`{"tool_calls":[]}` 表示"不调用工具"，没有任何请求能把指针置回 `nil`。缺 `reset` 就只有重启容器一条路，用例之间会互相污染。
+
+- `POST /control` 增加布尔字段 `reset_tool_calls: true`：把 `forcedToolCalls` 置回 `nil`，恢复"首轮调用第一个已声明工具、带 tool 消息后直接作答"的默认行为。与其他开关一样用指针字段，未出现时不改变现状。
+- 强制列表只对**紧接的第一次**工具阶段生效一次，用掉后自动回到默认行为（`one_shot_tool_calls`，缺省 `true`）。理由：一次提问会连续发两次非流式请求（第 1 轮带候选工具，第 2 轮带工具结果），若强制列表不撤销，第 2 轮会再报一批同样的调用，用例断言到的记录数就取决于轮次而不是被测口径。
+
+### D14 apitest 中需要网关桩的用例
+
+`apitest` 通过 `API_BASE_URL` 只连 API，此前没有任何用例直接控制网关桩。新增 `apitest/lib/stub.py`，从环境变量 `STUB_BASE_URL`（缺省 `http://127.0.0.1:8091`）取地址，提供 `set_tool_calls(calls)`、`reset_tool_calls()`、`stats()` 三个函数；桩不可达时抛 `pytest.skip`，与现有 `_skip_if_gateway_unavailable` 的口径一致。`run_all.py` 的报告里这三个用例与其他用例一样出现。
+
+- 超长函数名截断：`/control` 强制一次 100 个字符的函数名，提问后 `GET /api/mcp/calls?limit=1` 的 `tool` 中工具名部分恰为 64 个字符、`status=denied`、`reason=not_allowed`。
+- 候选外调用不占名额：`/control` 强制 2 个候选外调用 + 3 个 `formula_hint__campus-tools`，断言前 2 条 `not_allowed`、后 3 条 `ok`，且没有 `limit`。
+
 ## Risks / Trade-offs
 
 - [黑名单不完整，私有网段内的其它主机仍可被探测] → 规约已明确不封私有网段（`mcp-demo` 就在其中）；教师是受信角色；黑名单覆盖本编排内的敏感服务与云元数据地址。

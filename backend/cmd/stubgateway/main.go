@@ -55,7 +55,9 @@ func main() {
 		log.Fatalf("invalid -dim %d: must be positive", *dim)
 	}
 
-	s := &state{dim: *dim, abortAfterDeltas: -1}
+	// onceToolCalls is on by default: a forced list belongs to one tool stage,
+	// not to every later request (design.md Decision 13).
+	s := &state{dim: *dim, abortAfterDeltas: -1, onceToolCalls: true}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /embeddings", s.handleEmbeddings)
@@ -136,8 +138,11 @@ type state struct {
 
 	// forcedToolCalls, when non-nil, replaces the deterministic tool call:
 	// an empty list means "answer without calling any tool" (design.md
-	// Decision 12). The pointed-to slice is replaced wholesale on control.
+	// Decision 12). The pointed-to slice is replaced wholesale on control, and
+	// onceToolCalls decides whether the next tool-stage request consumes it
+	// (Decision 13).
 	forcedToolCalls *[]forcedToolCall
+	onceToolCalls   bool
 }
 
 type embeddingRequest struct {
@@ -276,6 +281,14 @@ func (s *state) handleChat(w http.ResponseWriter, r *http.Request) {
 	var forced []forcedToolCall
 	if forcedSet {
 		forced = append([]forcedToolCall(nil), (*s.forcedToolCalls)...)
+		// A non-empty forced list drives one tool-stage request only: the turn's
+		// second non-streamed request carries tool messages and must answer with
+		// text, not repeat the same calls (design.md Decision 13). An empty list
+		// stays until reset, because "this stub never calls tools" is a session
+		// switch other checks rely on.
+		if s.onceToolCalls && len(forced) > 0 && len(req.Tools) > 0 {
+			s.forcedToolCalls = nil
+		}
 	}
 	s.mu.Unlock()
 
@@ -547,6 +560,10 @@ type controlRequest struct {
 	AbortAfterDeltas     *int              `json:"abort_after_deltas"`
 	ChatText             *string           `json:"chat_text"`
 	ToolCalls            *[]forcedToolCall `json:"tool_calls"`
+	// ResetToolCalls clears the forced list back to the deterministic default;
+	// without it a test could only replace one list with another (design.md
+	// Decision 13).
+	ResetToolCalls *bool `json:"reset_tool_calls"`
 }
 
 func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
@@ -585,6 +602,9 @@ func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
 		calls := append([]forcedToolCall(nil), (*req.ToolCalls)...)
 		s.forcedToolCalls = &calls
 	}
+	if req.ResetToolCalls != nil && *req.ResetToolCalls {
+		s.forcedToolCalls = nil
+	}
 	resp := map[string]any{
 		"embed_fail":              s.embedFail,
 		"chat_fail":               s.chatFail,
@@ -593,6 +613,7 @@ func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
 		"abort_after_deltas":      s.abortAfterDeltas,
 		"chat_text":               s.chatText,
 		"tool_calls":              s.forcedToolCalls,
+		"once_tool_calls":         s.onceToolCalls,
 	}
 	s.mu.Unlock()
 

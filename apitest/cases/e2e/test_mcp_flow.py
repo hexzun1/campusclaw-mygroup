@@ -4,10 +4,14 @@ import json
 
 import pytest
 
-from lib import actions, api, data, db, sse
+from lib import actions, api, data, db, sse, stub
 
 SERVER_NAME = "campus-tools"
 TOOL_REF = f"formula_hint@{SERVER_NAME}"
+TOOL_REF_FUNCTION = f"formula_hint__{SERVER_NAME}"
+# A refused call is recorded with the function name the model used; there is
+# no resolved tool@server pair because the host never matched a candidate.
+OFF_CANDIDATE = f"unit_convert__{SERVER_NAME}"
 TRIGGER = "勾股定理"
 
 
@@ -189,4 +193,59 @@ def test_mcp_tool_flow_and_disconnect_denies(cfg, conn, tokens, prefix):
         assert db_denied, "数据库 mcp_tool_calls 中没有 denied 记录"
         assert db_denied[0]["reason"] == "not_connected", db_denied[0]
     finally:
+        _restore_campus_tools(cfg, conn, tokens, server, original, created, skill_id)
+
+
+@pytest.mark.gateway
+def test_off_candidate_calls_do_not_use_the_budget(cfg, conn, tokens, prefix):
+    """spec 「工具调用循环」Scenario 候选集外的调用不占调用名额 (design D3).
+
+    Two calls the host would never forward plus three real ones: all three real
+    ones reach the remote, and none is recorded as a limit.
+    """
+    stub.set_tool_calls(
+        [
+            {"name": OFF_CANDIDATE, "arguments": "{}"},
+            {"name": OFF_CANDIDATE, "arguments": "{}"},
+            {"name": TOOL_REF_FUNCTION, "arguments": '{"topic":"勾股定理"}'},
+            {"name": TOOL_REF_FUNCTION, "arguments": '{"topic":"勾股定理"}'},
+            {"name": TOOL_REF_FUNCTION, "arguments": '{"topic":"勾股定理"}'},
+        ]
+    )
+    server, original, created = _resolve_campus_tools(cfg, conn, tokens)
+    skill_id = None
+    try:
+        actions.connect_server(cfg, tokens["teacher_a"], server["id"])
+        skill_id = actions.create_skill(
+            cfg,
+            tokens["teacher_a"],
+            data.skill_source(f"{prefix}_budget", TRIGGER, tools=TOOL_REF),
+        )
+        agent_id = actions.create_agent(
+            cfg, tokens["teacher_a"], f"{prefix}_budget", skill_ids=[skill_id]
+        )
+        conversation = actions.create_conversation(cfg, tokens["student_a1"], agent_id)
+        conversation_id = conversation["id"]
+
+        meta, text = _stream(cfg, tokens, conversation_id, "请给我一个勾股定理的公式提示。")
+        assert meta["status"] == "ok", meta
+        assert text, "回答正文为空"
+
+        calls = meta.get("tool_calls") or []
+        denied = [c for c in calls if c["tool"] == OFF_CANDIDATE]
+        forwarded = [c for c in calls if c["tool"] == TOOL_REF]
+        assert len(denied) == 2, f"候选外调用记录不是 2 条：{calls}"
+        assert all(c["status"] == "denied" and c["reason"] == "not_allowed" for c in denied), denied
+        assert len(forwarded) == 3, f"候选内调用记录不是 3 条：{calls}"
+        assert all(c["status"] == "ok" for c in forwarded), forwarded
+        assert all(c.get("reason") != "limit" for c in forwarded), forwarded
+        assert all(c["round"] == 1 for c in forwarded), forwarded
+
+        rows = _audit_rows(conn, conversation_id)
+        assert len(rows) == 5, rows
+        assert sum(1 for r in rows if r["status"] == "ok") == 3, rows
+        assert sum(1 for r in rows if r["status"] == "denied") == 2, rows
+        assert not any(r["reason"] == "limit" for r in rows), rows
+    finally:
+        stub.reset_tool_calls()
         _restore_campus_tools(cfg, conn, tokens, server, original, created, skill_id)

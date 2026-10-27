@@ -1,6 +1,10 @@
 """GET /api/mcp/calls"""
 
-from lib import actions, api, data, db
+import json
+
+import pytest
+
+from lib import actions, api, data, db, sse, stub
 
 CALL_KEYS = {
     "id",
@@ -129,3 +133,79 @@ def test_other_class_teacher_only_sees_own_class(cfg, conn, tokens, teacher_b, p
         )
     }
     assert {c["username"] for c in calls} <= b_usernames, calls
+
+
+@pytest.mark.gateway
+def test_overlong_function_name_is_truncated_in_the_audit(cfg, conn, tokens, prefix):
+    """spec 「调用审计」Scenario 超长函数名不影响同轮审计 (design D2).
+
+    The model can name a function nobody declared. The record must still land,
+    with the tool column cut to its 64-character width.
+    """
+    long_name = "x" * 100
+    stub.set_tool_calls([{"name": long_name, "arguments": "{}"}])
+    try:
+        server = actions.register_server(
+            cfg, tokens["teacher_a"], f"{data.server_prefix(prefix)}-trunc", cfg.mcp_auth_token
+        )
+        actions.connect_server(cfg, tokens["teacher_a"], server["id"])
+        skill_id = actions.create_skill(
+            cfg,
+            tokens["teacher_a"],
+            data.skill_source(f"{prefix}_trunc", "勾股定理", tools=f"formula_hint@{server['name']}"),
+        )
+        agent_id = actions.create_agent(
+            cfg, tokens["teacher_a"], f"{prefix}_trunc", skill_ids=[skill_id]
+        )
+        conversation = actions.create_conversation(cfg, tokens["student_a1"], agent_id)
+        conversation_id = conversation["id"]
+
+        resp = api.request(
+            cfg,
+            "POST",
+            f"/api/conversations/{conversation_id}/stream",
+            token=tokens["student_a1"],
+            json={"question": "勾股定理怎么用？"},
+            stream=True,
+            timeout=api.STREAM_TIMEOUT,
+        )
+        try:
+            content_type = resp.headers.get("Content-Type", "")
+            if resp.status_code == 503 and "text/event-stream" not in content_type:
+                pytest.skip("对话网关不可用：流式接口在事件流开始前返回 503")
+            assert resp.status_code == 200, resp.text
+            events = sse.collect(resp)
+        finally:
+            resp.close()
+
+        meta = events[0][1]
+        names = {name for name, _ in events}
+        assert "error" not in names, meta
+        denied = [c for c in meta.get("tool_calls") or [] if c.get("tool") == long_name]
+        assert denied, f"meta.tool_calls 中没有超长函数名的记录：{meta}"
+        assert denied[0]["status"] == "denied", denied[0]
+        assert denied[0]["reason"] == "not_allowed", denied[0]
+
+        listing = api.request(
+            cfg, "GET", "/api/mcp/calls", token=tokens["teacher_a"], params={"limit": 1}
+        )
+        assert listing.status_code == 200, listing.text
+        first = listing.json()[0]
+        assert first["conversation_id"] == conversation_id, first
+        tool_part, _, server_part = first["tool"].partition("@")
+        assert tool_part == "x" * 64, f"工具名未截断到 64 个字符：{first['tool']!r}"
+        assert server_part == "", first
+        assert first["status"] == "denied"
+        assert first["reason"] == "not_allowed"
+
+        row = db.fetch_one(
+            conn,
+            "SELECT CHAR_LENGTH(tool) AS tool_len, status, reason FROM mcp_tool_calls "
+            "WHERE conversation_id = %s ORDER BY id DESC LIMIT 1",
+            (conversation_id,),
+        )
+        assert row is not None, "超长函数名的记录未写入 mcp_tool_calls"
+        assert int(row["tool_len"]) == 64, row
+        assert row["status"] == "denied" and row["reason"] == "not_allowed", row
+    finally:
+        stub.reset_tool_calls()

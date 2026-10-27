@@ -84,7 +84,7 @@ func TestEmbedUnrelatedTextsCosineBelowThreshold(t *testing.T) {
 
 // newTestServer wires the same routes main() serves.
 func newTestServer(dim int) *httptest.Server {
-	s := &state{dim: dim}
+	s := &state{dim: dim, onceToolCalls: true}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /embeddings", s.handleEmbeddings)
 	mux.HandleFunc("POST /chat/completions", s.handleChat)
@@ -435,5 +435,38 @@ func TestStubToolCallsHonorsControl(t *testing.T) {
 	reply = decodeStubReply(t, postJSON(t, srv.URL+"/chat/completions", toolTurnBody))
 	if got := reply.Choices[0].Message.ToolCalls; len(got) != 0 {
 		t.Errorf("an empty control list must mean answer without calls, got %+v", got)
+	}
+}
+
+// TestStubToolCallsForcedListIsOneShot is design.md Decision 13: a forced list
+// drives one tool-stage request, and reset_tool_calls restores the default so a
+// later turn is not affected.
+func TestStubToolCallsForcedListIsOneShot(t *testing.T) {
+	srv := newTestServer(16)
+	defer srv.Close()
+
+	postJSON(t, srv.URL+"/control", `{"tool_calls":[
+		{"name":"unit_convert__campus-tools","arguments":"{}"}]}`)
+
+	first := decodeStubReply(t, postJSON(t, srv.URL+"/chat/completions", toolTurnBody))
+	calls := first.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].Function.Name != "unit_convert__campus-tools" {
+		t.Fatalf("first turn tool_calls = %+v, want the forced call", calls)
+	}
+
+	// The list is consumed, so the same request falls back to the default.
+	second := decodeStubReply(t, postJSON(t, srv.URL+"/chat/completions", toolTurnBody))
+	calls = second.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].Function.Name != "formula_hint__campus-tools" {
+		t.Errorf("second turn tool_calls = %+v, want the default first declared tool", calls)
+	}
+
+	// reset_tool_calls restores the default setter outright.
+	postJSON(t, srv.URL+"/control", `{"tool_calls":[]}`)
+	postJSON(t, srv.URL+"/control", `{"reset_tool_calls":true}`)
+	third := decodeStubReply(t, postJSON(t, srv.URL+"/chat/completions", toolTurnBody))
+	calls = third.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].Function.Name != "formula_hint__campus-tools" {
+		t.Errorf("after reset tool_calls = %+v, want the default first declared tool", calls)
 	}
 }

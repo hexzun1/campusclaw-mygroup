@@ -83,6 +83,71 @@ def test_invalid_registration_returns_400(cfg, tokens):
         assert resp.json().get("error"), resp.text
 
 
+def test_forbidden_targets_return_400(cfg, tokens, prefix):
+    """spec 「工具服务器登记与管理」Scenario 被禁止的地址."""
+    forbidden = (
+        "http://localhost:8090",
+        "http://127.0.0.1:8090",
+        "http://[::1]:8090",
+        "http://169.254.169.254",
+        "http://0.0.0.0:8090",
+        "http://db:3306",
+        "http://API:8081",
+        "http://qdrant:6333",
+        "http://web",
+    )
+    for base_url in forbidden:
+        resp = api.request(
+            cfg,
+            "POST",
+            "/api/mcp/servers",
+            token=tokens["teacher_a"],
+            json={
+                "name": f"{data.server_prefix(prefix)}-forbidden",
+                "base_url": base_url,
+                "token": "x",
+            },
+        )
+        assert resp.status_code == 400, f"{base_url}: {resp.status_code} {resp.text}"
+        assert "不允许" in resp.json().get("error", ""), f"{base_url}: {resp.text}"
+
+    # The allowed forms stay allowed: the blacklist must not swallow mcp-demo
+    # or a private address (spec: 被禁止的地址 AND clause).
+    allowed = ("http://mcp-demo:8090", "http://10.0.0.5:8090")
+    for index, base_url in enumerate(allowed):
+        server = actions.register_server(
+            cfg,
+            tokens["teacher_a"],
+            f"{data.server_prefix(prefix)}-allowed{index}",
+            "x",
+            base_url=base_url,
+        )
+        assert server["base_url"] == base_url
+
+
+def test_token_length_counts_bytes(cfg, tokens, prefix):
+    """spec 「工具服务器登记与管理」Scenario 令牌按字节计长度."""
+    prefix_name = data.server_prefix(prefix)
+    too_long = api.request(
+        cfg,
+        "POST",
+        "/api/mcp/servers",
+        token=tokens["teacher_a"],
+        json={
+            "name": f"{prefix_name}-longtoken",
+            "base_url": "http://mcp-demo:8090",
+            "token": "汉" * 171,
+        },
+    )
+    assert too_long.status_code == 400, too_long.text
+    assert "字节" in too_long.json().get("error", ""), too_long.text
+
+    fits = actions.register_server(
+        cfg, tokens["teacher_a"], f"{prefix_name}-oktoken", "汉" * 170
+    )
+    assert fits["has_token"] is True
+
+
 def test_student_cannot_register_server(cfg, tokens, prefix):
     resp = api.request(
         cfg,
