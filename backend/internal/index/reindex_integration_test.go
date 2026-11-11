@@ -354,15 +354,21 @@ func TestReindexIntegrationConcurrentRebuildsLeaveOnlyTheLastGeneration(t *testi
 		errB <- err
 	}()
 
-	// While A is paused, B must not have deleted or replaced anything: the
-	// point set is still exactly A's current chunks.
+	// While A is paused inside Embed, it has already deleted the old vectors
+	// and committed its new chunks, but has not written the new vectors yet.
+	// Qdrant is therefore empty — expecting A's chunk ids here would fail even
+	// with correct serialization. What must hold is that B changed nothing:
+	// vectors stay empty and A's chunks stay current.
 	select {
 	case err := <-errB:
 		t.Fatalf("B finished while A was paused: %v", err)
 	case <-time.After(300 * time.Millisecond):
 	}
-	if got := pointIDs(env.scrollPoints(t, materialID)); !sameIDs(got, idsA) {
-		t.Fatalf("B changed the point set while A was paused: got %v, want A's %v", got, idsA)
+	if got := pointIDs(env.scrollPoints(t, materialID)); len(got) != 0 {
+		t.Fatalf("vector set while A was paused = %v, want empty: A deletes before it embeds", got)
+	}
+	if got := env.currentChunkIDs(t, materialID); !sameIDs(got, idsA) {
+		t.Fatalf("B replaced A's chunks while A was paused: got %v, want %v", got, idsA)
 	}
 
 	close(gate)
