@@ -12,8 +12,9 @@
 //     recent request bodies, so "the model was not called" is
 //     assertable.
 //   - POST /control           toggles embedding failure, chat failure, an
-//     out-of-range [9] citation, a pre-stream failure, a mid-stream abort and
-//     an exact answer text.
+//     out-of-range [9] citation, a pre-stream failure, a mid-stream abort, an
+//     exact answer text, and parking chat requests (hold_chat/release_chat)
+//     so a case can act while the model is still generating.
 //
 // It is never built into the production image (docker-compose.yml builds only
 // ./cmd/server) and carries no credentials.
@@ -143,6 +144,15 @@ type state struct {
 	// (Decision 13).
 	forcedToolCalls *[]forcedToolCall
 	onceToolCalls   bool
+
+	// holdChat parks every chat request on chatGate until release_chat closes
+	// it, so a case can cut a dependency while the model is still "generating"
+	// (the tool-stage authorization scenario for a disconnect mid-generation).
+	// heldChatCount lets the test wait for the request to actually arrive
+	// instead of sleeping.
+	holdChat      bool
+	chatGate      chan struct{}
+	heldChatCount int
 }
 
 type embeddingRequest struct {
@@ -256,6 +266,26 @@ type stubToolCall struct {
 	} `json:"function"`
 }
 
+// waitIfHeld parks the caller while hold_chat is on. The wait is bounded: a
+// case that forgets release_chat must fail on the host's gateway timeout, not
+// hang the stub forever.
+func (s *state) waitIfHeld() {
+	s.mu.Lock()
+	held := s.holdChat
+	gate := s.chatGate
+	if held {
+		s.heldChatCount++
+	}
+	s.mu.Unlock()
+	if !held || gate == nil {
+		return
+	}
+	select {
+	case <-gate:
+	case <-time.After(60 * time.Second):
+	}
+}
+
 func (s *state) handleChat(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	if err != nil {
@@ -268,6 +298,8 @@ func (s *state) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "request body is not valid JSON")
 		return
 	}
+
+	s.waitIfHeld()
 
 	s.mu.Lock()
 	s.chatCalls++
@@ -564,6 +596,10 @@ type controlRequest struct {
 	// without it a test could only replace one list with another (design.md
 	// Decision 13).
 	ResetToolCalls *bool `json:"reset_tool_calls"`
+	// HoldChat parks incoming chat requests until release_chat; the response's
+	// held_chat_count tells a test when the parked request has arrived.
+	HoldChat    *bool `json:"hold_chat"`
+	ReleaseChat *bool `json:"release_chat"`
 }
 
 func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
@@ -605,6 +641,19 @@ func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
 	if req.ResetToolCalls != nil && *req.ResetToolCalls {
 		s.forcedToolCalls = nil
 	}
+	if req.HoldChat != nil {
+		s.holdChat = *req.HoldChat
+		if *req.HoldChat && s.chatGate == nil {
+			s.chatGate = make(chan struct{})
+		}
+	}
+	if req.ReleaseChat != nil && *req.ReleaseChat {
+		if s.chatGate != nil {
+			close(s.chatGate)
+			s.chatGate = nil
+		}
+		s.holdChat = false
+	}
 	resp := map[string]any{
 		"embed_fail":              s.embedFail,
 		"chat_fail":               s.chatFail,
@@ -614,6 +663,8 @@ func (s *state) handleControl(w http.ResponseWriter, r *http.Request) {
 		"chat_text":               s.chatText,
 		"tool_calls":              s.forcedToolCalls,
 		"once_tool_calls":         s.onceToolCalls,
+		"holding":                 s.holdChat,
+		"held_chat_count":         s.heldChatCount,
 	}
 	s.mu.Unlock()
 

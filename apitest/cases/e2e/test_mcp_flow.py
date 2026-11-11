@@ -1,6 +1,7 @@
 """End-to-end MCP flow: connect, route, call, audit, disconnect then deny."""
 
 import json
+import threading
 
 import pytest
 
@@ -65,7 +66,7 @@ def _resolve_campus_tools(cfg, conn, tokens):
             return item, dict(row), False
 
     server = actions.register_server(
-        cfg, tokens["teacher_a"], SERVER_NAME, cfg.mcp_auth_token
+        cfg, tokens["teacher_a"], SERVER_NAME, cfg.mcp_auth_token, base_url=actions.mcp_base_url()
     )
     return server, {"status": "disconnected", "last_error": None}, True
 
@@ -203,15 +204,6 @@ def test_off_candidate_calls_do_not_use_the_budget(cfg, conn, tokens, prefix):
     Two calls the host would never forward plus three real ones: all three real
     ones reach the remote, and none is recorded as a limit.
     """
-    stub.set_tool_calls(
-        [
-            {"name": OFF_CANDIDATE, "arguments": "{}"},
-            {"name": OFF_CANDIDATE, "arguments": "{}"},
-            {"name": TOOL_REF_FUNCTION, "arguments": '{"topic":"勾股定理"}'},
-            {"name": TOOL_REF_FUNCTION, "arguments": '{"topic":"勾股定理"}'},
-            {"name": TOOL_REF_FUNCTION, "arguments": '{"topic":"勾股定理"}'},
-        ]
-    )
     server, original, created = _resolve_campus_tools(cfg, conn, tokens)
     skill_id = None
     try:
@@ -227,6 +219,17 @@ def test_off_candidate_calls_do_not_use_the_budget(cfg, conn, tokens, prefix):
         conversation = actions.create_conversation(cfg, tokens["student_a1"], agent_id)
         conversation_id = conversation["id"]
 
+        # Set the forced list inside the try so a setup failure cannot leave the
+        # stub proposing these calls to the next case in the run.
+        stub.set_tool_calls(
+            [
+                {"name": OFF_CANDIDATE, "arguments": "{}"},
+                {"name": OFF_CANDIDATE, "arguments": "{}"},
+                {"name": TOOL_REF_FUNCTION, "arguments": '{"topic":"勾股定理"}'},
+                {"name": TOOL_REF_FUNCTION, "arguments": '{"topic":"勾股定理"}'},
+                {"name": TOOL_REF_FUNCTION, "arguments": '{"topic":"勾股定理"}'},
+            ]
+        )
         meta, text = _stream(cfg, tokens, conversation_id, "请给我一个勾股定理的公式提示。")
         assert meta["status"] == "ok", meta
         assert text, "回答正文为空"
@@ -249,3 +252,69 @@ def test_off_candidate_calls_do_not_use_the_budget(cfg, conn, tokens, prefix):
     finally:
         stub.reset_tool_calls()
         _restore_campus_tools(cfg, conn, tokens, server, original, created, skill_id)
+
+
+@pytest.mark.gateway
+def test_disconnect_while_the_model_is_generating_denies_the_call(cfg, conn, tokens, prefix):
+    """spec mcp-tools「模型生成调用期间断开」(design D1).
+
+    The stub parks the tool-stage request, so the disconnect lands while the
+    model is still generating and before any call is forwarded. The released
+    call must be denied as not_connected, never reach the remote, and leave an
+    audit row on the same conversation.
+    """
+    server, original, created = _resolve_campus_tools(cfg, conn, tokens)
+    skill_id = None
+    try:
+        actions.connect_server(cfg, tokens["teacher_a"], server["id"])
+        skill_id = actions.create_skill(
+            cfg,
+            tokens["teacher_a"],
+            data.skill_source(f"{prefix}_mid_gen", TRIGGER, tools=TOOL_REF),
+        )
+        agent_id = actions.create_agent(
+            cfg, tokens["teacher_a"], f"{prefix}_mid_gen", skill_ids=[skill_id]
+        )
+        conversation = actions.create_conversation(cfg, tokens["student_a1"], agent_id)
+        conversation_id = conversation["id"]
+
+        stub.hold_chat()
+        result: dict[str, object] = {}
+
+        def run_stream() -> None:
+            try:
+                result["value"] = _stream(cfg, tokens, conversation_id, "请给我一个勾股定理的公式提示。")
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+                result["error"] = exc
+
+        thread = threading.Thread(target=run_stream, daemon=True)
+        thread.start()
+        try:
+            stub.wait_until_held()
+            actions.disconnect_server(cfg, tokens["teacher_a"], server["id"])
+        finally:
+            stub.release_chat()
+            thread.join(timeout=api.STREAM_TIMEOUT[1])
+
+        assert not thread.is_alive(), "释放网关桩后对话仍未结束"
+        if "error" in result:
+            raise result["error"]
+        meta, text = result["value"]
+        denied = [c for c in meta.get("tool_calls") or [] if c.get("tool") == TOOL_REF]
+        assert denied, f"生成期间断开后 meta.tool_calls 中没有 {TOOL_REF}：{meta}"
+        assert denied[0]["status"] == "denied", meta
+        assert denied[0].get("reason") == "not_connected", meta
+        assert meta["status"] == "ok", meta
+        assert text, "断开后的回答正文为空"
+
+        rows = _audit_rows(conn, conversation_id)
+        denied_rows = [
+            r for r in rows if r["status"] == "denied" and r["tool"] == "formula_hint"
+        ]
+        assert denied_rows, f"数据库中没有 denied 记录：{rows}"
+        assert denied_rows[0]["reason"] == "not_connected", denied_rows
+        assert denied_rows[0]["server"] == SERVER_NAME, denied_rows
+    finally:
+        stub.release_chat()
+        _restore_campus_tools(cfg, conn, tokens, server, original, created, skill_id)
+

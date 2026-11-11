@@ -19,14 +19,18 @@ def request(
     *,
     token: str | None = None,
     timeout: Any = DEFAULT_TIMEOUT,
+    base_url: str | None = None,
+    extra_headers: dict[str, str] | None = None,
     **kwargs: Any,
 ) -> requests.Response:
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if extra_headers:
+        headers.update(extra_headers)
     return requests.request(
         method,
-        cfg.api_base_url + path,
+        (base_url or cfg.api_base_url) + path,
         headers=headers,
         timeout=timeout,
         **kwargs,

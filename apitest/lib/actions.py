@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Sequence
 
 from . import api
 from .config import Config
+
+DEFAULT_MCP_BASE_URL = "http://mcp-demo:8090"
+
+
+def mcp_base_url() -> str:
+    """Where the demo MCP server answers. The compose service name by default;
+    override with MCP_SERVER_BASE_URL when the stack runs outside that network."""
+    return (os.environ.get("MCP_SERVER_BASE_URL") or DEFAULT_MCP_BASE_URL).rstrip("/")
 
 
 def create_agent(
@@ -53,14 +62,14 @@ def register_server(
     name: str,
     token_value: str,
     *,
-    base_url: str = "http://mcp-demo:8090",
+    base_url: str | None = None,
 ) -> dict[str, Any]:
     resp = api.request(
         cfg,
         "POST",
         "/api/mcp/servers",
         token=token,
-        json={"name": name, "base_url": base_url, "token": token_value},
+        json={"name": name, "base_url": base_url or mcp_base_url(), "token": token_value},
     )
     assert resp.status_code == 201, f"登记服务器失败：HTTP {resp.status_code} {resp.text}"
     return resp.json()

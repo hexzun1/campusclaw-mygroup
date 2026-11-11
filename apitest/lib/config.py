@@ -35,6 +35,10 @@ class ConfigError(RuntimeError):
 @dataclass(frozen=True)
 class Config:
     api_base_url: str
+    # Optional second entry address. Proxy-boundary cases need two clients whose
+    # requests reach the API from different source addresses; one base URL can
+    # only ever produce one. Cases that need it skip when it is unset.
+    api_base_url_alt: str | None
     db_host: str
     db_port: int
     db_user: str
@@ -86,9 +90,11 @@ def load_config() -> Config:
         raise ConfigError(f"APITEST_DB_PORT 超出端口范围：{db_port}")
 
     base_url = os.environ.get("API_BASE_URL", "").strip() or DEFAULT_API_BASE_URL
+    alt_base_url = os.environ.get("API_BASE_URL_ALT", "").strip() or None
 
     return Config(
         api_base_url=base_url.rstrip("/"),
+        api_base_url_alt=alt_base_url.rstrip("/") if alt_base_url else None,
         db_host=os.environ["APITEST_DB_HOST"].strip(),
         db_port=db_port,
         db_user=os.environ["APITEST_DB_USER"].strip(),

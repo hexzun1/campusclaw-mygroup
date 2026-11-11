@@ -9,6 +9,7 @@ same way `_skip_if_gateway_unavailable` treats a stream that answers 503.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Sequence
 
 import pytest
@@ -39,6 +40,31 @@ def set_tool_calls(calls: Sequence[dict[str, str]]) -> None:
 def reset_tool_calls() -> None:
     """Restore the stub's default tool-call behaviour."""
     _post({"reset_tool_calls": True})
+
+
+def hold_chat() -> None:
+    """Park every chat request until release_chat, keeping the host mid-turn."""
+    _post({"hold_chat": True})
+
+
+def release_chat() -> None:
+    """Let parked and future chat requests proceed."""
+    _post({"release_chat": True})
+
+
+def held_chat_count() -> int:
+    return int(_post({}).get("held_chat_count") or 0)
+
+
+def wait_until_held(timeout: float = 10.0) -> None:
+    """Block until a chat request is parked, so a case can cut a dependency
+    exactly while the model is generating instead of racing a sleep."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if held_chat_count() > 0:
+            return
+        time.sleep(0.05)
+    pytest.fail("模型请求没有停在网关桩上")
 
 
 def stats() -> dict[str, Any]:

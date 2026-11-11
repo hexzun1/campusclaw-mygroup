@@ -24,7 +24,7 @@ def test_teacher_registers_server_and_database_matches(cfg, conn, tokens, prefix
         "tools_refreshed_at",
     }, server
     assert server["name"] == name
-    assert server["base_url"] == "http://mcp-demo:8090"
+    assert server["base_url"] == actions.mcp_base_url()
     assert server["has_token"] is True
     assert server["status"] == "disconnected"
     assert server["tool_count"] == 0
@@ -43,7 +43,7 @@ def test_teacher_registers_server_and_database_matches(cfg, conn, tokens, prefix
     assert row is not None, "服务器未写入数据库"
     assert row["class_id"] == _class_id(conn, "A班")
     assert row["name"] == name
-    assert row["base_url"] == "http://mcp-demo:8090"
+    assert row["base_url"] == actions.mcp_base_url()
     assert row["status"] == "disconnected"
     assert int(row["token_len"]) > 0
 
