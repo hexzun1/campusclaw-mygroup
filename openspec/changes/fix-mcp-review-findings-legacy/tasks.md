@@ -6,7 +6,7 @@
 
 - [ ] 1.1 在 `backend/internal/db` 增加调用专用的本班服务器/connected/工具缓存/凭据一致性读取，按 design D1 与断开、缓存替换共用服务器主键锁顺序；保留连接路径取凭据能力 — verify: 在 `mcp_integration_test.go` 覆盖「已连接服务器的正常调用」「过期或伪造的候选不能绕过服务端边界」「重新连接恢复后续合法调用」，并用事务屏障验证撤权先提交时不返回可用凭据。
 - [x] 1.2 调整 `ToolCatalog` 与 `runCall` 在每次合法候选调用前执行即时准入，使用该次返回的地址/凭据；映射 denied/not_connected 与 error/remote_error，保留候选外、参数和预算规则 — verify: `toolstage_test.go` 覆盖「模型生成调用期间断开」「同批调用之间断开」「下一工具轮次重新复核授权」「授权读取故障与撤权可区分」，断言远端新增请求数、实际 round 与模型错误消息。
-- [ ] 1.3 补充准入后在途、重新连接与候选内拒绝的预算回归；核对被拒记录沿既有审计与 meta 路径投影且不含令牌 — verify: 屏障暂停远端响应时断开能完成、下一调用拒绝；三次候选内预算不因撤权重试扩大；在 `backend/` 执行 `go test ./internal/tutor ./internal/mcp`，相关用例通过。
+- [x] 1.3 补充准入后在途、重新连接与候选内拒绝的预算回归；核对被拒记录沿既有审计与 meta 路径投影且不含令牌 — verify: 屏障暂停远端响应时断开能完成、下一调用拒绝；三次候选内预算不因撤权重试扩大；在 `backend/` 执行 `go test ./internal/tutor ./internal/mcp`，相关用例通过。
 - [ ] 1.4 扩展 `apitest/cases/e2e/test_mcp_flow.py` 及所需测试桩控制，在同一轮对话的模型暂停/两调用之间执行教师断开 — verify: 对照本 delta 12 个 Scenario，关联检查远端计数、SSE meta 与本班审计；重跑既有四项交叉验证，学生/他班请求仍被服务端拒绝；逐场景记录证据与未验证项。
 
 ## 2. 代理边界与登录限流隔离
