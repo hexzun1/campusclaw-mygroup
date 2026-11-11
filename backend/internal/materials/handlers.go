@@ -18,15 +18,16 @@ import (
 
 type Handlers struct {
 	Conn *sql.DB
-	// Indexer runs the vector pipeline after a material is committed. It is the
-	// only place that embeds text and writes vectors during upload.
+	// Indexer is the shared coordinator: upload indexing, the startup
+	// compensation scan and reindex all go through this instance, so they use
+	// the same per-material lock.
 	Indexer *index.Indexer
 	// Vectors is used by the reindex flow, which deletes a material's vectors
 	// before swapping its chunks.
-	Vectors VectorStore
+	Vectors index.VectorDeleter
 }
 
-func NewHandlers(conn *sql.DB, indexer *index.Indexer, vectors VectorStore) *Handlers {
+func NewHandlers(conn *sql.DB, indexer *index.Indexer, vectors index.VectorDeleter) *Handlers {
 	return &Handlers{Conn: conn, Indexer: indexer, Vectors: vectors}
 }
 

@@ -22,6 +22,56 @@ type fakeToolCatalog struct {
 	servers map[string]*db.MCPServer
 	tools   map[int][]db.MCPTool
 	tokens  map[int]string
+
+	// callCredErr injects a database fault into the per-call authorization
+	// read, which must stay distinguishable from a revoked server.
+	callCredErr error
+	// callCreds counts authorization reads that reached this catalog.
+	callCreds int
+	// disconnectedAfter returns true once the server has been disconnected
+	// mid-stage; tests set it to model a teacher disconnecting between calls.
+	disconnected bool
+}
+
+func (c *fakeToolCatalog) CallCredential(ctx context.Context, serverID, classID int, tool string) (db.CallCredential, error) {
+	c.callCreds++
+	if classID != c.classID {
+		return db.CallCredential{}, db.ErrNotFound
+	}
+	if c.callCredErr != nil {
+		return db.CallCredential{}, c.callCredErr
+	}
+	var server *db.MCPServer
+	for _, s := range c.servers {
+		if s.ID == serverID {
+			server = s
+			break
+		}
+	}
+	if server == nil {
+		return db.CallCredential{}, db.ErrNotFound
+	}
+	if c.disconnected || server.Status != db.MCPServerConnected {
+		return db.CallCredential{}, db.ErrNotConnected
+	}
+	for _, t := range c.tools[serverID] {
+		if t.Name == tool {
+			return db.CallCredential{BaseURL: server.BaseURL, Token: c.tokens[serverID]}, nil
+		}
+	}
+	return db.CallCredential{}, db.ErrNotConnected
+}
+
+// disconnect models a commit of the teacher's disconnect: it drops the status
+// and clears the tool cache, exactly as DisconnectServer does.
+func (c *fakeToolCatalog) disconnect(serverName string) {
+	server, ok := c.servers[serverName]
+	if !ok {
+		return
+	}
+	server.Status = db.MCPServerDisconnected
+	c.tools[server.ID] = nil
+	c.disconnected = true
 }
 
 func (c *fakeToolCatalog) ServerByName(ctx context.Context, classID int, name string) (*db.MCPServer, error) {
@@ -84,12 +134,20 @@ type fakeMCP struct {
 	calls  []fakeMCPCall
 	result mcp.CallResult
 	err    error
+	// afterCall runs once a call has been recorded, so a test can commit a
+	// disconnect between two calls the model requested in the same batch.
+	afterCall func(index int)
 }
 
 func (f *fakeMCP) Call(ctx context.Context, baseURL, token, tool string, arguments json.RawMessage) (mcp.CallResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, fakeMCPCall{BaseURL: baseURL, Token: token, Tool: tool, Arguments: arguments})
+	index := len(f.calls)
+	hook := f.afterCall
 	f.mu.Unlock()
+	if hook != nil {
+		hook(index)
+	}
 	return f.result, f.err
 }
 
@@ -109,6 +167,9 @@ type fakeToolChatter struct {
 	replies   []gateway.AssistantMessage
 	errs      []error
 	exchanges []fakeToolExchange
+	// beforeReply runs with the exchange index before the reply is returned,
+	// which is where a teacher can disconnect while the model is generating.
+	beforeReply func(index int)
 }
 
 func (f *fakeToolChatter) ChatWithTools(ctx context.Context, messages []gateway.ChatMessage, tools []gateway.ToolDefinition) (gateway.AssistantMessage, error) {
@@ -122,8 +183,12 @@ func (f *fakeToolChatter) ChatWithTools(ctx context.Context, messages []gateway.
 	if index < len(f.errs) {
 		err = f.errs[index]
 	}
+	hook := f.beforeReply
 	f.mu.Unlock()
 
+	if hook != nil {
+		hook(index)
+	}
 	if err != nil {
 		return gateway.AssistantMessage{}, err
 	}
@@ -145,6 +210,15 @@ func toolCall(id, name, arguments string) gateway.ToolCall {
 
 func newTestStage(catalog ToolCatalog, client MCPToolCaller, chat ToolChatter) *ToolStage {
 	return &ToolStage{Catalog: catalog, Client: client, Chat: chat}
+}
+
+func unitCandidate() ToolCandidate {
+	return ToolCandidate{
+		FunctionName: "unit_convert__campus-tools", ToolName: "unit_convert",
+		ServerID: 7, ServerName: "campus-tools", BaseURL: "http://mcp-demo:8090",
+		Description: "单位换算",
+		Parameters:  json.RawMessage(`{"type":"object","required":["value","from","to"],"properties":{"value":{"type":"number"},"from":{"type":"string"},"to":{"type":"string"}}}`),
+	}
 }
 
 func campusCandidate() ToolCandidate {
@@ -702,5 +776,233 @@ func TestToolResultRedactedReachesTheUserMessage(t *testing.T) {
 	}
 	if !strings.Contains(final.Content, "***") {
 		t.Errorf("the token's place must be ***:\n%s", final.Content)
+	}
+}
+
+// --- 每次调用的服务端准入（design.md D1）--------------------------------
+
+func TestToolCallDisconnectDuringGenerationIsDenied(t *testing.T) {
+	catalog := defaultCatalog()
+	chat := &fakeToolChatter{
+		replies: []gateway.AssistantMessage{
+			{ToolCalls: []gateway.ToolCall{toolCall("c1", "formula_hint__campus-tools", `{"topic":"勾股定理"}`)}},
+		},
+		// The teacher disconnects while the model is generating this call.
+		beforeReply: func(index int) {
+			if index == 0 {
+				catalog.disconnect("campus-tools")
+			}
+		},
+	}
+	client := &fakeMCP{result: mcp.CallResult{Text: "unreachable"}}
+	stage := newTestStage(catalog, client, chat)
+
+	out := stage.Run(context.Background(), ToolStageInput{
+		ClassID: 1, Candidates: []ToolCandidate{campusCandidate()},
+	})
+
+	if len(out.Records) != 1 {
+		t.Fatalf("records = %+v, want one", out.Records)
+	}
+	r := out.Records[0]
+	if r.Status != toolCallStatusDenied || r.Reason != reasonNotConnected || r.Round != 1 {
+		t.Errorf("record = %+v, want denied/not_connected round 1", r)
+	}
+	if client.callCount() != 0 {
+		t.Errorf("remote calls = %d, want 0 after the server was disconnected", client.callCount())
+	}
+	if len(out.Results) != 0 {
+		t.Errorf("results = %+v, want none", out.Results)
+	}
+}
+
+func TestToolCallDisconnectBetweenCallsOfOneBatchIsDenied(t *testing.T) {
+	catalog := defaultCatalog()
+	chat := &fakeToolChatter{replies: []gateway.AssistantMessage{{
+		ToolCalls: []gateway.ToolCall{
+			toolCall("c1", "formula_hint__campus-tools", `{"topic":"勾股定理"}`),
+			toolCall("c2", "unit_convert__campus-tools", `{"value":1,"from":"m","to":"cm"}`),
+		},
+	}}}
+	client := &fakeMCP{result: mcp.CallResult{Text: "ok"}}
+	client.afterCall = func(index int) {
+		if index == 1 {
+			// Disconnect commits between the two calls of the same batch.
+			catalog.disconnect("campus-tools")
+		}
+	}
+	stage := newTestStage(catalog, client, chat)
+
+	out := stage.Run(context.Background(), ToolStageInput{
+		ClassID: 1, Candidates: []ToolCandidate{campusCandidate(), unitCandidate()},
+	})
+
+	if len(out.Records) != 2 {
+		t.Fatalf("records = %+v, want two", out.Records)
+	}
+	if first := out.Records[0]; first.Status != toolCallStatusOK {
+		t.Errorf("first record = %+v, want ok", first)
+	}
+	second := out.Records[1]
+	if second.Status != toolCallStatusDenied || second.Reason != reasonNotConnected {
+		t.Errorf("second record = %+v, want denied/not_connected", second)
+	}
+	if client.callCount() != 1 {
+		t.Errorf("remote calls = %d, want only the already-authorized one", client.callCount())
+	}
+}
+
+func TestToolCallNextRoundRechecksAuthorization(t *testing.T) {
+	catalog := defaultCatalog()
+	chat := &fakeToolChatter{
+		replies: []gateway.AssistantMessage{
+			{ToolCalls: []gateway.ToolCall{toolCall("c1", "formula_hint__campus-tools", `{"topic":"勾股定理"}`)}},
+			{ToolCalls: []gateway.ToolCall{toolCall("c2", "unit_convert__campus-tools", `{"value":1,"from":"m","to":"cm"}`)}},
+			{Content: "完毕"},
+		},
+		beforeReply: func(index int) {
+			if index == 1 {
+				// The disconnect lands between the two model rounds.
+				catalog.disconnect("campus-tools")
+			}
+		},
+	}
+	client := &fakeMCP{result: mcp.CallResult{Text: "ok"}}
+	stage := newTestStage(catalog, client, chat)
+
+	out := stage.Run(context.Background(), ToolStageInput{
+		ClassID: 1, Candidates: []ToolCandidate{campusCandidate(), unitCandidate()},
+	})
+
+	if len(out.Records) != 2 {
+		t.Fatalf("records = %+v, want two", out.Records)
+	}
+	if first := out.Records[0]; first.Status != toolCallStatusOK || first.Round != 1 {
+		t.Errorf("first record = %+v, want ok round 1", first)
+	}
+	second := out.Records[1]
+	if second.Status != toolCallStatusDenied || second.Reason != reasonNotConnected || second.Round != 2 {
+		t.Errorf("second record = %+v, want denied/not_connected round 2", second)
+	}
+	if client.callCount() != 1 {
+		t.Errorf("remote calls = %d, want 1", client.callCount())
+	}
+}
+
+func TestToolCallAuthorizationReadFaultIsRemoteError(t *testing.T) {
+	catalog := defaultCatalog()
+	catalog.callCredErr = errors.New("database is down")
+	chat := &fakeToolChatter{replies: []gateway.AssistantMessage{{
+		ToolCalls: []gateway.ToolCall{toolCall("c1", "formula_hint__campus-tools", `{"topic":"勾股定理"}`)},
+	}}}
+	client := &fakeMCP{result: mcp.CallResult{Text: "unreachable"}}
+	stage := newTestStage(catalog, client, chat)
+
+	out := stage.Run(context.Background(), ToolStageInput{
+		ClassID: 1, Candidates: []ToolCandidate{campusCandidate()},
+	})
+
+	if len(out.Records) != 1 {
+		t.Fatalf("records = %+v, want one", out.Records)
+	}
+	r := out.Records[0]
+	if r.Status != toolCallStatusError || r.Reason != reasonRemoteError {
+		t.Errorf("record = %+v, want error/remote_error, not a revocation", r)
+	}
+	if client.callCount() != 0 {
+		t.Errorf("remote calls = %d, want 0 on an authorization fault", client.callCount())
+	}
+}
+
+func TestToolCallUsesCredentialNotTheCandidateSnapshot(t *testing.T) {
+	catalog := defaultCatalog()
+	// The candidate was built from a stale snapshot: the server URL and token
+	// changed after Resolve. Only the per-call credential may be used.
+	catalog.servers["campus-tools"].BaseURL = "http://fresh-mcp:9000"
+	catalog.tokens[7] = "fresh-token"
+
+	chat := &fakeToolChatter{replies: []gateway.AssistantMessage{
+		{ToolCalls: []gateway.ToolCall{toolCall("c1", "formula_hint__campus-tools", `{"topic":"勾股定理"}`)}},
+		{Content: "完毕"},
+	}}
+	client := &fakeMCP{result: mcp.CallResult{Text: "ok"}}
+	stage := newTestStage(catalog, client, chat)
+
+	candidate := campusCandidate()
+	candidate.BaseURL = "http://stale-mcp:8090"
+	out := stage.Run(context.Background(), ToolStageInput{
+		ClassID: 1, Candidates: []ToolCandidate{candidate},
+	})
+
+	if len(out.Records) != 1 || out.Records[0].Status != toolCallStatusOK {
+		t.Fatalf("records = %+v, want one ok call", out.Records)
+	}
+	if client.callCount() != 1 {
+		t.Fatalf("remote calls = %d, want 1", client.callCount())
+	}
+	got := client.calls[0]
+	if got.BaseURL != "http://fresh-mcp:9000" || got.Token != "fresh-token" {
+		t.Errorf("remote call used %+v, want the freshly authorized address and token", got)
+	}
+}
+
+func TestToolCallDeniedByRevocationStillConsumesTheBudget(t *testing.T) {
+	catalog := defaultCatalog()
+	catalog.disconnect("campus-tools")
+	chat := &fakeToolChatter{replies: []gateway.AssistantMessage{{
+		ToolCalls: []gateway.ToolCall{
+			toolCall("c1", "formula_hint__campus-tools", `{"topic":"a"}`),
+			toolCall("c2", "formula_hint__campus-tools", `{"topic":"b"}`),
+			toolCall("c3", "formula_hint__campus-tools", `{"topic":"c"}`),
+			toolCall("c4", "formula_hint__campus-tools", `{"topic":"d"}`),
+		},
+	}}}
+	client := &fakeMCP{}
+	stage := newTestStage(catalog, client, chat)
+
+	out := stage.Run(context.Background(), ToolStageInput{
+		ClassID: 1, Candidates: []ToolCandidate{campusCandidate()},
+	})
+
+	if len(out.Records) != 4 {
+		t.Fatalf("records = %+v, want four", out.Records)
+	}
+	for i := 0; i < 3; i++ {
+		if out.Records[i].Status != toolCallStatusDenied || out.Records[i].Reason != reasonNotConnected {
+			t.Errorf("record %d = %+v, want denied/not_connected", i, out.Records[i])
+		}
+	}
+	if last := out.Records[3]; last.Status != toolCallStatusDenied || last.Reason != reasonLimit {
+		t.Errorf("fourth record = %+v, want the budget to be exhausted by revoked calls", last)
+	}
+	if client.callCount() != 0 {
+		t.Errorf("remote calls = %d, want 0", client.callCount())
+	}
+}
+
+func TestToolCallCandidateFromAnotherClassIsDenied(t *testing.T) {
+	chat := &fakeToolChatter{replies: []gateway.AssistantMessage{{
+		ToolCalls: []gateway.ToolCall{toolCall("c1", "formula_hint__campus-tools", `{"topic":"勾股定理"}`)},
+	}}}
+	client := &fakeMCP{result: mcp.CallResult{Text: "unreachable"}}
+	stage := newTestStage(defaultCatalog(), client, chat)
+
+	// A forged candidate names a server the class cannot use; the server-side
+	// read, not the candidate, decides.
+	candidate := campusCandidate()
+	candidate.ServerID = 99
+	out := stage.Run(context.Background(), ToolStageInput{
+		ClassID: 1, Candidates: []ToolCandidate{candidate},
+	})
+
+	if len(out.Records) != 1 {
+		t.Fatalf("records = %+v, want one", out.Records)
+	}
+	r := out.Records[0]
+	if r.Status != toolCallStatusDenied || r.Reason != reasonNotConnected {
+		t.Errorf("record = %+v, want denied/not_connected", r)
+	}
+	if client.callCount() != 0 {
+		t.Errorf("remote calls = %d, want 0", client.callCount())
 	}
 }

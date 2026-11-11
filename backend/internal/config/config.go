@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,6 +27,14 @@ type Config struct {
 
 	LoginMaxFailures int
 	LoginLockSeconds int
+
+	// TrustedProxyCIDRs is the explicitly configured set of direct TCP peers
+	// allowed to supply the login rate-limit client address via X-Real-IP
+	// (design.md D2). It is empty by default: no proxy — including a private
+	// or loopback address — is trusted until listed here. Each entry is
+	// already masked/canonical, and IPv4-mapped IPv6 entries are reduced to
+	// IPv4 so matching and normalization agree.
+	TrustedProxyCIDRs []netip.Prefix
 
 	SeedTeacherAPassword  string
 	SeedStudentA1Password string
@@ -144,6 +154,11 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	trustedProxyCIDRs, err := parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		JWTSecret: os.Getenv("JWT_SECRET"),
 		JWTTTL:    durationOrDefault("JWT_TTL", defaultJWTTTL),
@@ -159,6 +174,8 @@ func Load() (*Config, error) {
 
 		LoginMaxFailures: intOrDefault("LOGIN_MAX_FAILURES", defaultLoginMaxFailures),
 		LoginLockSeconds: intOrDefault("LOGIN_LOCK_SECONDS", defaultLoginLockSeconds),
+
+		TrustedProxyCIDRs: trustedProxyCIDRs,
 
 		SeedTeacherAPassword:  os.Getenv("SEED_TEACHER_A_PASSWORD"),
 		SeedStudentA1Password: os.Getenv("SEED_STUDENT_A1_PASSWORD"),
@@ -294,4 +311,66 @@ func positiveInt64(name string, def int64) (int64, error) {
 		return 0, fmt.Errorf("%s is invalid: must be a positive integer", name)
 	}
 	return n, nil
+}
+
+// parseTrustedProxyCIDRs reads TRUSTED_PROXY_CIDRS: a comma-separated list of
+// literal IP addresses or CIDR ranges. An unset or blank value means "trust no
+// proxy at all" — private and loopback ranges are never trusted implicitly.
+// Every entry is canonicalized (host bits masked, IPv4-mapped IPv6 reduced to
+// IPv4) and a range covering every address — including an IPv4-mapped /96 that
+// reduces to 0.0.0.0/0 — is rejected at startup so the trust boundary can
+// never silently become "trust everyone".
+func parseTrustedProxyCIDRs(raw string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(raw, ",")
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		entry := strings.TrimSpace(part)
+		if entry == "" {
+			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS is invalid: empty entry in comma-separated list")
+		}
+		prefix, err := normalizeTrustedProxy(entry)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS is invalid: %q: %w", entry, err)
+		}
+		if prefix.Bits() == 0 {
+			return nil, fmt.Errorf(
+				"TRUSTED_PROXY_CIDRS is invalid: %q would trust every address; list the controlling proxy IP or CIDR", entry)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
+// normalizeTrustedProxy parses one trust-list entry. A bare address becomes a
+// single-host prefix; a CIDR has its host bits cleared. IPv4-mapped IPv6 forms
+// are reduced to their IPv4 equivalent so they match the already-unmapped
+// RemoteAddr and X-Real-IP values.
+func normalizeTrustedProxy(entry string) (netip.Prefix, error) {
+	if strings.Contains(entry, "/") {
+		prefix, err := netip.ParsePrefix(entry)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("not a valid IP or CIDR")
+		}
+		if prefix.Addr().Is4In6() {
+			if prefix.Bits() < 96 {
+				return netip.Prefix{}, fmt.Errorf("IPv4-mapped CIDR must be at least /96")
+			}
+			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+		}
+		return prefix.Masked(), nil
+	}
+
+	addr, err := netip.ParseAddr(entry)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("not a valid IP or CIDR")
+	}
+	if addr.Zone() != "" {
+		return netip.Prefix{}, fmt.Errorf("address zone is not allowed")
+	}
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, addr.BitLen()), nil
 }

@@ -94,6 +94,11 @@ func New(chunks ChunkStore, embedder Embedder, vectors VectorStore, batch int, t
 
 // IndexMaterial indexes every pending chunk of one material.
 //
+// This is the external entry point: it takes the coordinator's per-material
+// lock, the same instance Reindex uses, so an upload or the compensation scan
+// can never write the previous generation's vectors after a rebuild deleted
+// them. The whole indexing run happens inside that critical section.
+//
 // The work runs on a context detached from the caller's, with its own
 // timeout: a client that disconnects mid-upload must not leave chunks pending
 // forever. A failing batch marks itself and every chunk after it as failed and
@@ -104,10 +109,17 @@ func (i *Indexer) IndexMaterial(ctx context.Context, materialID, classID int) er
 	unlock := i.locks.lock(materialID)
 	defer unlock()
 
+	return i.indexMaterialLocked(ctx, i.chunks, materialID, classID)
+}
+
+// indexMaterialLocked indexes pending chunks assuming the caller already holds
+// the per-material lock. It MUST NOT take the lock again: that lock is not
+// reentrant, and Reindex calls this path from inside its own critical section.
+func (i *Indexer) indexMaterialLocked(ctx context.Context, chunks ChunkStore, materialID, classID int) error {
 	workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.timeout)
 	defer cancel()
 
-	pending, err := i.chunks.ListChunksByMaterial(workCtx, materialID, classID, db.IndexPending)
+	pending, err := chunks.ListChunksByMaterial(workCtx, materialID, classID, db.IndexPending)
 	if err != nil {
 		return err
 	}
@@ -120,10 +132,10 @@ func (i *Indexer) IndexMaterial(ctx context.Context, materialID, classID int) er
 
 		if err := i.indexBatch(workCtx, batch); err != nil {
 			log.Printf("index material %d: batch of %d chunks failed: %v", materialID, len(batch), err)
-			i.markFailed(ctx, pending[start:])
+			i.markFailed(ctx, chunks, pending[start:])
 			return nil
 		}
-		if err := i.chunks.UpdateChunksStatus(workCtx, chunkIDs(batch), db.IndexIndexed); err != nil {
+		if err := chunks.UpdateChunksStatus(workCtx, chunkIDs(batch), db.IndexIndexed); err != nil {
 			return err
 		}
 	}
@@ -165,13 +177,15 @@ func (i *Indexer) indexBatch(ctx context.Context, batch []db.Chunk) error {
 }
 
 // markFailed records the failure on a detached context, so a timed-out batch
-// can still be reported.
-func (i *Indexer) markFailed(parent context.Context, chunks []db.Chunk) {
+// can still be reported. It runs while the material lock is still held: a
+// reindex that follows must not have its new chunks overwritten by this run's
+// failure marking.
+func (i *Indexer) markFailed(parent context.Context, chunks ChunkStore, failed []db.Chunk) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), failMarkTimeout)
 	defer cancel()
 
-	if err := i.chunks.UpdateChunksStatus(ctx, chunkIDs(chunks), db.IndexFailed); err != nil {
-		log.Printf("mark %d chunks failed: %v", len(chunks), err)
+	if err := chunks.UpdateChunksStatus(ctx, chunkIDs(failed), db.IndexFailed); err != nil {
+		log.Printf("mark %d chunks failed: %v", len(failed), err)
 	}
 }
 

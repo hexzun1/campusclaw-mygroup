@@ -53,6 +53,10 @@ type ToolCatalog interface {
 	ServerByName(ctx context.Context, classID int, name string) (*db.MCPServer, error)
 	ServerTools(ctx context.Context, serverID, classID int) ([]db.MCPTool, error)
 	ServerToken(ctx context.Context, serverID, classID int) (string, error)
+	// CallCredential authorizes one call at the moment it is made. Resolve
+	// only decides what the model may see; this decides what may actually
+	// reach the remote server (design.md D1).
+	CallCredential(ctx context.Context, serverID, classID int, tool string) (db.CallCredential, error)
 }
 
 // MCPToolCaller performs one remote tools/call. *mcp.Client satisfies it.
@@ -78,6 +82,10 @@ func (c SQLToolCatalog) ServerTools(ctx context.Context, serverID, classID int) 
 
 func (c SQLToolCatalog) ServerToken(ctx context.Context, serverID, classID int) (string, error) {
 	return db.GetServerToken(ctx, c.Conn, serverID, classID)
+}
+
+func (c SQLToolCatalog) CallCredential(ctx context.Context, serverID, classID int, tool string) (db.CallCredential, error) {
+	return db.GetCallCredential(ctx, c.Conn, serverID, classID, tool)
 }
 
 // ToolCandidate is one MCP tool the model may call this turn. FunctionName is
@@ -460,16 +468,24 @@ func (s *ToolStage) runCall(ctx context.Context, classID int, call gateway.ToolC
 		return record, toolFailedPrefix + err.Error()
 	}
 
-	token, err := s.Catalog.ServerToken(ctx, candidate.ServerID, classID)
+	// Being in the candidate set authorized the model to ask, not the host to
+	// forward. Re-authorize now, so a disconnect that committed while the model
+	// was generating stops this and every later call in the turn (design.md D1).
+	cred, err := s.Catalog.CallCredential(ctx, candidate.ServerID, classID, candidate.ToolName)
 	if err != nil {
-		log.Printf("tutor: mcp token lookup for server %q failed: %v", candidate.ServerName, err)
+		record.DurationMS = s.now().Sub(start).Milliseconds()
+		if errors.Is(err, db.ErrNotConnected) || errors.Is(err, db.ErrNotFound) {
+			record.Status = toolCallStatusDenied
+			record.Reason = reasonNotConnected
+			return record, toolRejectedPrefix + "服务器已断开或该工具已不可用"
+		}
+		log.Printf("tutor: mcp call authorization for server %q failed: %v", candidate.ServerName, err)
 		record.Status = toolCallStatusError
 		record.Reason = reasonRemoteError
-		record.DurationMS = s.now().Sub(start).Milliseconds()
-		return record, toolFailedPrefix + "无法读取服务器凭据"
+		return record, toolFailedPrefix + "无法校验服务器授权"
 	}
 
-	result, err := s.Client.Call(ctx, candidate.BaseURL, token, candidate.ToolName, arguments)
+	result, err := s.Client.Call(ctx, cred.BaseURL, cred.Token, candidate.ToolName, arguments)
 	record.DurationMS = s.now().Sub(start).Milliseconds()
 	if err != nil {
 		record.Status = toolCallStatusError

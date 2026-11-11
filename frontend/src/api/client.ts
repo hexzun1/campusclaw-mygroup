@@ -468,12 +468,36 @@ export interface StreamHandlers {
   onError: (message: string) => void
 }
 
+// STREAM_INTERRUPTED is the fixed text for a stream that ended without a valid
+// business terminal (no done/error), carried invalid terminal data, or could
+// not be read. It never mirrors a server HTTP status: by the time it is shown
+// the response was already 200 text/event-stream.
+const STREAM_INTERRUPTED = '回答生成中断，请重试'
+
+// A stream terminal is a business event, not transport EOF. 'none' means the
+// answer is still open; once done/error is accepted all later frames are
+// ignored, including duplicates in the same chunk.
+type StreamTerminal = 'none' | 'done' | 'error'
+
+function isAbortError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError'
+}
+
 // streamConversation asks one question and reads the SSE answer with fetch —
 // the Authorization header cannot ride on the browser's native event-stream
 // client. Anything that fails before the stream starts is a plain JSON error —
 // 401 clears the token and returns to the login page, 503 shows the fixed
 // service text, and 400/404/409 keep the server's own error text. Mid-stream
 // failures arrive as an `error` event (generic text, no internal detail).
+//
+// The stream layer — not the parser — owns the protocol state. The parser only
+// frames bytes; this loop tracks whether meta arrived and which terminal was
+// accepted. A valid terminal ends consumption immediately (the reader is
+// cancelled without waiting for server EOF). A 200 EOF without a valid
+// terminal, invalid terminal data, or a read error rejects the promise with
+// the generic interruption ApiError (status 0) instead of resolving as if the
+// answer had finished. A valid error notifies onError once and resolves; it is
+// never reported a second time at EOF.
 export async function streamConversation(
   id: number,
   question: string,
@@ -506,21 +530,96 @@ export async function streamConversation(
   const stream = res.body
   if (!stream) throw new ApiError(res.status, '请求失败，请稍后重试')
   const reader = stream.getReader()
+
+  let sawMeta = false
+  let terminal: StreamTerminal = 'none'
+  let failure: ApiError | null = null
+
   const parser = createSSEParser((event) => {
-    if (event.event === 'meta') handlers.onMeta(JSON.parse(event.data) as StreamMeta)
-    else if (event.event === 'delta') handlers.onDelta((JSON.parse(event.data) as { text: string }).text)
-    else if (event.event === 'done') handlers.onDone((JSON.parse(event.data) as { message_id: number }).message_id)
-    else if (event.event === 'error') handlers.onError((JSON.parse(event.data) as { message: string }).message)
+    // The terminal guard: a settled stream ignores every late or duplicate
+    // frame, whether it is a delta or another terminal.
+    if (terminal !== 'none' || failure !== null) return
+    if (event.event !== 'meta' && event.event !== 'delta' && event.event !== 'done' && event.event !== 'error') return
+
+    let payload: unknown
+    try {
+      payload = JSON.parse(event.data)
+    } catch {
+      failure = new ApiError(0, STREAM_INTERRUPTED)
+      return
+    }
+
+    if (event.event === 'meta') {
+      sawMeta = true
+      handlers.onMeta(payload as StreamMeta)
+      return
+    }
+
+    if (event.event === 'delta') {
+      const text = (payload as { text?: unknown } | null)?.text
+      if (typeof text !== 'string') {
+        failure = new ApiError(0, STREAM_INTERRUPTED)
+        return
+      }
+      handlers.onDelta(text)
+      return
+    }
+
+    if (event.event === 'done') {
+      const messageID = (payload as { message_id?: unknown } | null)?.message_id
+      // done is meaningful only after meta and only for a positive integer id.
+      if (!sawMeta || typeof messageID !== 'number' || !Number.isInteger(messageID) || messageID <= 0) {
+        failure = new ApiError(0, STREAM_INTERRUPTED)
+        return
+      }
+      terminal = 'done'
+      handlers.onDone(messageID)
+      return
+    }
+
+    // event.event === 'error'
+    const message = (payload as { message?: unknown } | null)?.message
+    if (typeof message !== 'string' || message === '') {
+      failure = new ApiError(0, STREAM_INTERRUPTED)
+      return
+    }
+    terminal = 'error'
+    handlers.onError(message)
   })
 
   try {
     for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      parser.feed(value)
+      const result = await reader.read()
+      if (result.done) {
+        // EOF is not a business terminal. Flush the parser first so a complete
+        // trailing frame without its blank line is still parsed, then decide.
+        parser.end()
+        break
+      }
+      parser.feed(result.value)
+      // A valid terminal ends consumption now — no further read, no EOF wait.
+      if (terminal !== 'none' || failure !== null) break
     }
-    parser.end()
+
+    if (failure === null && terminal === 'none') {
+      failure = new ApiError(0, STREAM_INTERRUPTED)
+    }
+    if (failure !== null) throw failure
+  } catch (err) {
+    // An active cancel (leaving the page or switching conversation) stays an
+    // AbortError so callers keep the silent cancellation path.
+    if (isAbortError(err) || signal?.aborted) {
+      throw isAbortError(err) ? err : new DOMException('The operation was aborted.', 'AbortError')
+    }
+    if (err instanceof ApiError) throw err
+    // A reader fault is the same generic interruption, never a fake status.
+    throw new ApiError(0, STREAM_INTERRUPTED)
   } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // Already closed or errored: releasing the lock is all that remains.
+    }
     reader.releaseLock()
   }
 }

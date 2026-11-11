@@ -608,6 +608,120 @@ func TestDeleteVsSaveRace(t *testing.T) {
 	}
 }
 
+// TestGetCallCredentialReturnsCredentialForConnectedServer covers the happy
+// path: the token is readable only through the per-call authorization read.
+func TestGetCallCredentialReturnsCredentialForConnectedServer(t *testing.T) {
+	conn := openTestDB(t)
+	ctx := context.Background()
+	classA, _, teacherA := fixture(t, conn)
+
+	id := createTestMCPServer(t, conn, classA, teacherA, "测试服务器-准入正常", "token-ok")
+	if err := ReplaceServerTools(ctx, conn, id, classA, []MCPTool{sampleTool("formula_hint")}); err != nil {
+		t.Fatalf("replace tools: %v", err)
+	}
+
+	cred, err := GetCallCredential(ctx, conn, id, classA, "formula_hint")
+	if err != nil {
+		t.Fatalf("GetCallCredential: %v", err)
+	}
+	if cred.Token != "token-ok" || cred.BaseURL != "http://127.0.0.1:1" {
+		t.Fatalf("credential = %+v", cred)
+	}
+
+	if _, err := GetCallCredential(ctx, conn, id, classA, "unit_convert"); !errors.Is(err, ErrNotConnected) {
+		t.Fatalf("uncached tool: err = %v, want ErrNotConnected", err)
+	}
+	if _, err := GetCallCredential(ctx, conn, id, classA+1, "formula_hint"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("other class: err = %v, want ErrNotFound", err)
+	}
+
+	if err := DisconnectServer(ctx, conn, id, classA); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+	if _, err := GetCallCredential(ctx, conn, id, classA, "formula_hint"); !errors.Is(err, ErrNotConnected) {
+		t.Fatalf("after disconnect: err = %v, want ErrNotConnected", err)
+	}
+
+	// Reconnecting publishes a fresh cache and status, after which the same
+	// authorization read succeeds again without touching the denied history.
+	if err := ReplaceServerTools(ctx, conn, id, classA, []MCPTool{sampleTool("formula_hint")}); err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	if _, err := GetCallCredential(ctx, conn, id, classA, "formula_hint"); err != nil {
+		t.Fatalf("after reconnect: %v", err)
+	}
+}
+
+// TestGetCallCredentialBlocksUntilDisconnectCommits fixes the ordering behind
+// the "断开即失效" scenario: a disconnect that holds the server row first makes
+// the authorization read wait, and once it commits the read returns no
+// credential at all (design.md D1).
+func TestGetCallCredentialBlocksUntilDisconnectCommits(t *testing.T) {
+	conn := openTestDB(t)
+	writer := openTestDB(t)
+	ctx := context.Background()
+	classA, _, teacherA := fixture(t, conn)
+
+	id := createTestMCPServer(t, conn, classA, teacherA, "测试服务器-准入屏障", "token-barrier")
+	if err := ReplaceServerTools(ctx, conn, id, classA, []MCPTool{sampleTool("formula_hint")}); err != nil {
+		t.Fatalf("replace tools: %v", err)
+	}
+
+	// The disconnect transaction locks the server row first, exactly as
+	// DisconnectServer does, and only then clears the cache.
+	tx, err := writer.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin disconnect tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var locked int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM mcp_servers WHERE id = ? AND class_id = ? FOR UPDATE`, id, classA).Scan(&locked); err != nil {
+		t.Fatalf("lock server: %v", err)
+	}
+
+	type outcome struct {
+		cred CallCredential
+		err  error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		cred, err := GetCallCredential(context.Background(), conn, id, classA, "formula_hint")
+		done <- outcome{cred: cred, err: err}
+	}()
+
+	// The authorization read must still be waiting on the row lock.
+	select {
+	case got := <-done:
+		t.Fatalf("GetCallCredential returned before the disconnect committed: %+v", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_tools WHERE server_id = ?`, id); err != nil {
+		t.Fatalf("clear tools: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE mcp_servers SET status = ?, tools_refreshed_at = NULL WHERE id = ? AND class_id = ?`,
+		MCPServerDisconnected, id, classA); err != nil {
+		t.Fatalf("disconnect server: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit disconnect: %v", err)
+	}
+
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, ErrNotConnected) {
+			t.Fatalf("err = %v, want ErrNotConnected after the disconnect committed", got.err)
+		}
+		if got.cred.Token != "" || got.cred.BaseURL != "" {
+			t.Fatalf("credential leaked after revocation: %+v", got.cred)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetCallCredential did not return after the disconnect committed")
+	}
+}
+
 // assertNoDeadlock fails on MySQL error 1213, which would mean the two lock
 // orders do not actually match (design.md Decision 11).
 func assertNoDeadlock(t *testing.T, round int, errs ...error) {

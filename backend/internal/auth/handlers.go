@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"net"
 	"net/http"
+	"net/netip"
+	"strconv"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -19,6 +20,14 @@ type Handlers struct {
 	Conn    *sql.DB
 	Issuer  *TokenIssuer
 	Limiter *LoginLimiter
+
+	// TrustedProxies is the explicit list of direct TCP peers allowed to
+	// supply X-Real-IP for the login rate-limit key. Empty means no peer is
+	// trusted; see ClientIP.
+	TrustedProxies []netip.Prefix
+
+	// lookupUser is a test seam; nil uses the database lookup.
+	lookupUser func(context.Context, *sql.DB, string) (*db.User, error)
 }
 
 func NewHandlers(conn *sql.DB, issuer *TokenIssuer, limiter *LoginLimiter) *Handlers {
@@ -44,12 +53,20 @@ type loginRequest struct {
 	Password string `json:"password"`
 } // @name LoginRequest
 
-func clientKey(r *http.Request, username string) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
+// clientKey builds the rate-limit bucket key from the username and the
+// normalized client address. The username length prefix keeps the two parts
+// unambiguous even when the username itself contains the separator.
+func clientKey(username string, addr netip.Addr) string {
+	return strconv.Itoa(len(username)) + ":" + username + "@" + addr.String()
+}
+
+// findUser resolves a username, allowing handler tests to substitute the
+// database without a live MySQL instance.
+func (h *Handlers) findUser(ctx context.Context, username string) (*db.User, error) {
+	if h.lookupUser != nil {
+		return h.lookupUser(ctx, h.Conn, username)
 	}
-	return username + "|" + host
+	return db.GetUserByUsername(ctx, h.Conn, username)
 }
 
 // Login implements POST /api/login: it validates the credentials and answers
@@ -62,7 +79,7 @@ func clientKey(r *http.Request, username string) string {
 // @Produce json
 // @Param credentials body loginRequest true "用户名与密码"
 // @Success 200 {object} map[string]string "token、username、role"
-// @Failure 400 {object} httpapi.errorBody "请求格式错误"
+// @Failure 400 {object} httpapi.errorBody "请求格式错误或客户端地址不可识别"
 // @Failure 401 {object} httpapi.errorBody "用户名或密码错误（含连续失败后的限流）"
 // @Failure 503 {object} httpapi.errorBody "服务暂不可用"
 // @Router /api/login [post]
@@ -77,14 +94,23 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := clientKey(r, req.Username)
+	// The client address is resolved before any limiter or password work. A
+	// trusted proxy that omits or malforms X-Real-IP (and an unparseable
+	// direct peer) is a request error: 400 without touching a bucket.
+	clientAddr, err := ClientIP(r, h.TrustedProxies)
+	if err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "无法识别的客户端地址")
+		return
+	}
+
+	key := clientKey(req.Username, clientAddr)
 
 	if h.Limiter.Locked(key) {
 		httpapi.WriteError(w, http.StatusUnauthorized, httpapi.MsgBadCredentials)
 		return
 	}
 
-	user, err := db.GetUserByUsername(r.Context(), h.Conn, req.Username)
+	user, err := h.findUser(r.Context(), req.Username)
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
 		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
 		return

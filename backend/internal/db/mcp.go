@@ -152,6 +152,69 @@ func GetServerBySeedKey(ctx context.Context, conn *sql.DB, classID int, seedKey 
 	return s, nil
 }
 
+// ErrNotConnected reports that a call credential could not be issued: the
+// server is missing, belongs to another class, is not connected, or no longer
+// advertises the tool. Every case collapses into one error so a model cannot
+// probe for servers it may not use (design.md D1).
+var ErrNotConnected = errors.New("mcp server not connected")
+
+// CallCredential is the authorization snapshot for exactly one call. It must
+// not be cached or reused: the next call has to authorize again (design.md D1).
+type CallCredential struct {
+	BaseURL string
+	Token   string
+}
+
+// GetCallCredential authorizes one tool call. It locks the server row, then
+// re-checks the connection state and the tool cache inside the same short
+// transaction and only then reads the token, so a disconnect that committed
+// first makes every later call fail here. Lock order is server then
+// mcp_tools — the order DisconnectServer and ReplaceServerTools already take,
+// so these paths cannot deadlock. The transaction ends before the caller does
+// any network I/O; a server row is never held while waiting on the remote.
+func GetCallCredential(ctx context.Context, conn *sql.DB, serverID, classID int, tool string) (CallCredential, error) {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return CallCredential{}, fmt.Errorf("begin mcp call credential: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		cred   CallCredential
+		status string
+		token  []byte
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT status, base_url, auth_token FROM mcp_servers
+		 WHERE id = ? AND class_id = ? FOR UPDATE`, serverID, classID).Scan(&status, &cred.BaseURL, &token)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CallCredential{}, ErrNotFound
+	}
+	if err != nil {
+		return CallCredential{}, fmt.Errorf("lock mcp server for call: %w", err)
+	}
+	if status != MCPServerConnected {
+		return CallCredential{}, ErrNotConnected
+	}
+
+	var name string
+	err = tx.QueryRowContext(ctx,
+		`SELECT t.name FROM mcp_tools t JOIN mcp_servers s ON s.id = t.server_id
+		 WHERE t.server_id = ? AND s.class_id = ? AND t.name = ?`,
+		serverID, classID, tool).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CallCredential{}, ErrNotConnected
+	}
+	if err != nil {
+		return CallCredential{}, fmt.Errorf("check mcp tool cache for call: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return CallCredential{}, fmt.Errorf("commit mcp call credential: %w", err)
+	}
+	cred.Token = string(token)
+	return cred, nil
+}
+
 // GetServerToken is the single read path for the stored token.
 func GetServerToken(ctx context.Context, conn *sql.DB, id, classID int) (string, error) {
 	var token []byte

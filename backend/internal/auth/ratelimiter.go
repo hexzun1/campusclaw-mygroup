@@ -14,6 +14,7 @@ type LoginLimiter struct {
 	state       map[string]*limiterState
 	maxFailures int
 	lockFor     time.Duration
+	now         func() time.Time
 }
 
 type limiterState struct {
@@ -22,10 +23,17 @@ type limiterState struct {
 }
 
 func NewLoginLimiter(maxFailures, lockSeconds int) *LoginLimiter {
+	return newLoginLimiter(maxFailures, lockSeconds, time.Now)
+}
+
+// newLoginLimiter takes the clock explicitly so tests can cross the lock
+// boundary without sleeping for the real duration.
+func newLoginLimiter(maxFailures, lockSeconds int, now func() time.Time) *LoginLimiter {
 	return &LoginLimiter{
 		state:       make(map[string]*limiterState),
 		maxFailures: maxFailures,
 		lockFor:     time.Duration(lockSeconds) * time.Second,
+		now:         now,
 	}
 }
 
@@ -34,11 +42,12 @@ func (l *LoginLimiter) Locked(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	now := l.now()
 	st, ok := l.state[key]
 	if !ok {
 		return false
 	}
-	if time.Now().Before(st.lockedUntil) {
+	if now.Before(st.lockedUntil) {
 		return true
 	}
 	// Lock window has passed: forget prior failures so the key starts fresh.
@@ -54,14 +63,20 @@ func (l *LoginLimiter) RecordFailure(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	now := l.now()
 	st, ok := l.state[key]
 	if !ok {
 		st = &limiterState{}
 		l.state[key] = st
+	} else if !st.lockedUntil.IsZero() && !now.Before(st.lockedUntil) {
+		// The previous lock has expired; a new attempt counts from zero even
+		// if the caller did not ask Locked first.
+		st.failures = 0
+		st.lockedUntil = time.Time{}
 	}
 	st.failures++
 	if st.failures >= l.maxFailures {
-		st.lockedUntil = time.Now().Add(l.lockFor)
+		st.lockedUntil = now.Add(l.lockFor)
 	}
 }
 

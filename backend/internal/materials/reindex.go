@@ -1,15 +1,14 @@
 package materials
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log"
 	"net/http"
-	"time"
 
 	"campusclaw/backend/internal/db"
 	"campusclaw/backend/internal/httpapi"
+	"campusclaw/backend/internal/index"
 	"campusclaw/backend/internal/knowledge"
 )
 
@@ -17,24 +16,15 @@ import (
 // parameters, so anything larger is a malformed or hostile request.
 const maxReindexBodyBytes = 8 << 10
 
-// failMarkTimeout bounds the best-effort status write that records a failure,
-// on a context detached from the request.
-const failMarkTimeout = 10 * time.Second
-
-// VectorStore is the slice of the vector store the handlers need.
-type VectorStore interface {
-	DeleteByMaterial(ctx context.Context, materialID, classID int) error
-}
-
 // Reindex rebuilds one material's chunks under a new chunking strategy
 // (spec: 索引状态与重建).
 //
-// The order is deliberate (design.md Decision 7): the vectors go first, then
-// the chunks are swapped inside a transaction, then the new chunks are indexed.
-// Deleting first means no point is ever left pointing at a chunk that has been
-// replaced. A vector-store failure answers 503 without touching MySQL at all;
-// a failure of the MySQL step leaves the old chunks in place and marks them
-// failed, because their vectors are already gone.
+// Role, class and parameter validation all happen here, before the rebuild
+// starts. The rebuild itself runs in internal/index's coordinator so it shares
+// the per-material lock with ordinary indexing (upload and compensation); its
+// order and failure semantics live there. The job of this handler is only to
+// validate the request, hand the server-resolved material and class to the
+// coordinator, and write the response after the lock has been released.
 //
 // @Summary 重建索引
 // @Description 仅教师可用。先删除该材料的旧向量，再按新切分参数替换切片并重新索引；空 body 按 auto。参数不合法 400 且磁盘、数据库、向量库均不被改动。
@@ -60,6 +50,9 @@ func (h *Handlers) Reindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Class isolation: the material and its class come from the session-scoped
+	// lookup, never from the request body. Cross-class and missing are the same
+	// 404.
 	m := h.loadOwnClassMaterial(w, r)
 	if m == nil {
 		return
@@ -71,59 +64,37 @@ func (h *Handlers) Reindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parameters are validated before anything destructive can start.
 	params, err := knowledge.ParseParamsJSON(body)
 	if err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, "切分参数不合法："+err.Error())
 		return
 	}
 
-	entry, err := db.GetKnowledgeEntryByMaterialID(r.Context(), h.Conn, m.ID)
+	if h.Indexer == nil {
+		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
+		return
+	}
+
+	stats, err := h.Indexer.Reindex(r.Context(), index.ReindexRequest{
+		MaterialID: m.ID,
+		ClassID:    m.ClassID,
+		Params:     params,
+		Store:      index.SQLReindexStore{Conn: h.Conn},
+		Vectors:    h.Vectors,
+	})
 	if err != nil {
-		if errors.Is(err, db.ErrNotFound) {
+		if errors.Is(err, index.ErrReindexNotFound) {
 			httpapi.WriteError(w, http.StatusNotFound, httpapi.MsgNotFound)
 			return
 		}
+		log.Printf("reindex material %d: %v", m.ID, err)
 		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
 		return
 	}
 
-	// 1. The old vectors go first: nothing may point at chunks that are about to
-	// be replaced. On failure MySQL is left completely untouched.
-	if h.Vectors != nil {
-		if err := h.Vectors.DeleteByMaterial(r.Context(), m.ID, m.ClassID); err != nil {
-			log.Printf("reindex material %d: %v", m.ID, err)
-			httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
-			return
-		}
-	}
-
-	// 2. Swap the chunks in one transaction.
-	chunks := toDBChunks(knowledge.ChunkBody(entry.BodyText, params))
-
-	if err := db.ReplaceChunksForMaterial(r.Context(), h.Conn, m.ID, m.ClassID,
-		string(params.Strategy), params.ParamsJSON(), chunks); err != nil {
-		log.Printf("reindex material %d: replace chunks: %v", m.ID, err)
-		// The vectors are gone and the old chunks are still here, so the honest
-		// state is "failed"; a teacher can reindex again (best effort).
-		h.markChunksFailed(r.Context(), m.ID, m.ClassID)
-		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
-		return
-	}
-
-	// 3. Index the new chunks. A failure here is recorded on the chunks and does
-	// not turn the reindex into an error.
-	if h.Indexer != nil {
-		if err := h.Indexer.IndexMaterial(r.Context(), m.ID, m.ClassID); err != nil {
-			log.Printf("reindex material %d: index: %v", m.ID, err)
-		}
-	}
-
-	stats, err := db.GetChunkStats(r.Context(), h.Conn, m.ID, m.ClassID)
-	if err != nil {
-		httpapi.WriteError(w, http.StatusServiceUnavailable, httpapi.MsgServiceDown)
-		return
-	}
-
+	// The stats snapshot was read inside the critical section; only the HTTP
+	// write happens after the lock is released.
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{
 		"id":             m.ID,
 		"title":          m.Title,
@@ -131,24 +102,4 @@ func (h *Handlers) Reindex(w http.ResponseWriter, r *http.Request) {
 		"chunk_count":    stats.Count,
 		"chunk_strategy": stats.Strategy,
 	})
-}
-
-// markChunksFailed reports the failure on every chunk of a material. It is
-// best effort: it runs on a detached context and a failure here is only logged.
-func (h *Handlers) markChunksFailed(ctx context.Context, materialID, classID int) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failMarkTimeout)
-	defer cancel()
-
-	chunks, err := db.ListChunksByMaterial(ctx, h.Conn, materialID, classID, "")
-	if err != nil {
-		log.Printf("reindex material %d: list chunks for failure marking: %v", materialID, err)
-		return
-	}
-	ids := make([]int64, 0, len(chunks))
-	for _, c := range chunks {
-		ids = append(ids, c.ID)
-	}
-	if err := db.UpdateChunksStatus(ctx, h.Conn, ids, db.IndexFailed); err != nil {
-		log.Printf("reindex material %d: mark %d chunks failed: %v", materialID, len(ids), err)
-	}
 }

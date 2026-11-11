@@ -103,6 +103,7 @@ func main() {
 	limiter := auth.NewLoginLimiter(cfg.LoginMaxFailures, cfg.LoginLockSeconds)
 	tokenIssuer := auth.NewTokenIssuer(cfg.JWTSecret, cfg.JWTTTL)
 	authHandlers := auth.NewHandlers(conn, tokenIssuer, limiter)
+	authHandlers.TrustedProxies = cfg.TrustedProxyCIDRs
 	requireAuth := auth.RequireAuth(conn, tokenIssuer)
 
 	materialsHandlers := materials.NewHandlers(conn, indexer, vectorClient)
