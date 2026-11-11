@@ -1,6 +1,6 @@
 # 迭代 6 验收记录：MCP 评审问题修复（legacy 变更）
 
-对应 OpenSpec 变更：`openspec/changes/fix-mcp-review-findings-legacy/`
+对应 OpenSpec 变更：`openspec/changes/archive/2026-11-11-fix-mcp-review-findings-legacy/`
 验收日期：2026-11-11
 对应主规约：`openspec/specs/{auth-upload,knowledge-retrieval,mcp-tools,tutor-chat}`（本次已同步 35 条新场景）
 
