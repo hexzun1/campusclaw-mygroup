@@ -34,6 +34,7 @@ docker compose up --build -d
 - 健康检查：http://localhost:8080/health → `{"status":"ok"}`，无需登录
 - 接口文档：http://localhost:8080/swagger/ （开发编排下为 http://localhost:8081/swagger/；无需登录，可点「Authorize」填入 `Bearer <token>` 试调接口）；Swagger UI 读取的是同一份 OpenAPI 3 文档 `GET /openapi.json`（无需认证，不含密钥）
 - 共五个服务：web、api、db、qdrant、mcp-demo。只有 web 映射宿主端口；db（3306）与 qdrant（6333/6334）只在 Compose 网络内可达，mcp-demo（8090）只绑 `127.0.0.1` 供本机自查
+- **登录限流按「用户名 + 真实客户端 IP」计数**：正式编排给 web→api 单独划了 `edge` 网络（`172.31.240.0/24`），web 固定为 `172.31.240.10`，`.env` 的 `TRUSTED_PROXY_CIDRS` 只信任这一个 `/32`。不要改成整个网段——同网段的任何容器都能伪造 `X-Real-IP`。若该网段与宿主机已有网络冲突，同时修改 `docker-compose.yml` 的 `edge.ipam` 与 `.env` 的 `TRUSTED_PROXY_CIDRS`。开发编排没有代理，已显式置空，直连按 `RemoteAddr` 计数
 
 ### 本地开发：不接真实模型（确定性网关桩）
 

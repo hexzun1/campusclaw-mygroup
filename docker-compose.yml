@@ -45,8 +45,14 @@ services:
       DB_HOST: db
       DB_PORT: 3306
       QDRANT_URL: http://qdrant:6333
+      # 只有 web 容器所在的那一个地址可以覆盖客户端 IP；其他容器与宿主机
+      # 均按自己的 RemoteAddr 计数（design.md D2）。
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.31.240.10/32}
     volumes:
       - uploaddata:${UPLOAD_DIR}
+    networks:
+      - default
+      - edge
     depends_on:
       db:
         condition: service_healthy
@@ -59,9 +65,23 @@ services:
       context: ./frontend
     ports:
       - "${WEB_PORT:-8080}:80"
+    # web 只接入 edge：它对 api 的请求因此必然从下面这个固定地址发出，
+    # 可信代理列表才能收窄到单个地址而不是整个网段。
+    networks:
+      edge:
+        ipv4_address: 172.31.240.10
     depends_on:
       - api
     restart: unless-stopped
+
+networks:
+  # 只承载 web → api 的入口流量。同网段的其他工作负载不因此获得伪造
+  # X-Real-IP 的能力；若与宿主机已有网段冲突，改这里与 api 的
+  # TRUSTED_PROXY_CIDRS 两处即可。
+  edge:
+    ipam:
+      config:
+        - subnet: 172.31.240.0/24
 
 volumes:
   dbdata:
